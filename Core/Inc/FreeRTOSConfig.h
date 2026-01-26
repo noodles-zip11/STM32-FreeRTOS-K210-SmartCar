@@ -87,8 +87,11 @@ to exclude the API function. */
 #define INCLUDE_vTaskDelete                  1
 #define INCLUDE_vTaskCleanUpResources        0
 #define INCLUDE_vTaskSuspend                 1
-#define INCLUDE_vTaskDelayUntil              0
+#define INCLUDE_vTaskDelayUntil              1
 #define INCLUDE_vTaskDelay                   1
+#define INCLUDE_uxTaskGetStackHighWaterMark  1
+#define configCHECK_FOR_STACK_OVERFLOW      2
+#define configUSE_MALLOC_FAILED_HOOK        1
 #define INCLUDE_xTaskGetSchedulerState       1
 
 /* Cortex-M specific definitions. */
@@ -137,3 +140,4 @@ standard names. */
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */
+

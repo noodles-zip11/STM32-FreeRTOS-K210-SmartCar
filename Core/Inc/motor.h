@@ -15,6 +15,11 @@
 #define BIN1_SET HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_SET);
 #define BIN1_RESET HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
+typedef struct {
+    float left;
+    float right;
+} MotorTarget_t;
+
 
 void Motor_Set (int motor1,int motor2);
 void motorSpeedUp(void);

@@ -6,6 +6,8 @@
 #include "motor.h"
 #include "tim.h"
 #include "pid.h"
+#include "FreeRTOS.h"
+#include "queue.h"
 
 
 float g_TargetSpeed = 0;
@@ -13,6 +15,7 @@ extern float Motor1Speed ;
 extern float Motor2Speed ;
 extern  tpid pidMotor1Speed;
 extern  tpid pidMotor2Speed;
+extern QueueHandle_t MotorTargetQueueHandle;
 void Motor_Set (int motor1,int motor2) {
     if (motor2 < 0)
     {
@@ -68,10 +71,12 @@ void Motor_Set (int motor1,int motor2) {
 }
 
 void motorPidSetSpeed(float Motor1SetSpeed, float Motor2SetSpeed) {
-    pidMotor1Speed.targer_val = Motor1SetSpeed;
-    pidMotor2Speed.targer_val = Motor2SetSpeed;
+    MotorTarget_t target = { Motor1SetSpeed, Motor2SetSpeed };
 
-    //Motor_Set(PID_realize(&pidMotor1Speed,Motor1Speed),PID_realize(&pidMotor2Speed,Motor2Speed));
+    if (MotorTargetQueueHandle != NULL)
+    {
+        xQueueOverwrite(MotorTargetQueueHandle, &target);
+    }
 }
 
 
@@ -99,12 +104,13 @@ void motorSpeedCut(void)
     }
     else
     {
-        g_TargetSpeed = 0; // 减到底就停
+        g_TargetSpeed = 0; // 减到底就�?
     }
 
 
     motorPidSetSpeed(g_TargetSpeed, g_TargetSpeed);
 }
+
 
 
 
