@@ -95,15 +95,15 @@ float  k210PidOut2 = 0.00f;
 
 float pitch,roll,yaw;
 
-uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
-int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
-int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
-uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
+uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
+int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
+int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
+uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
 
 // --- 状态机相关变量 ---
 uint8_t rx_state = 0;      // 协议解析状�?
-uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
-uint8_t rx_data_cnt = 0;   // 数据计数�?
+uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
+uint8_t rx_data_cnt = 0;   // 数据计数�?
 typedef struct {
   uint8_t hw[4];
   float dist;
@@ -292,8 +292,8 @@ void StartControlTask(void const * argument)
   {
     if (xQueueReceive(MotorTargetQueueHandle, &target, 0) == pdTRUE)
     {
-      pidMotor1Speed.targer_val = target.left;
-      pidMotor2Speed.targer_val = target.right;
+      pidMotor1Speed.target_val = target.left;
+      pidMotor2Speed.target_val = target.right;
     }
 
     Encoder1Count=(short)__HAL_TIM_GET_COUNTER(&htim4);
@@ -404,7 +404,7 @@ void StartLogicTask(void const * argument)
 
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
     {
-      // 收到指令，开始干�?
+      // 收到指令，开始干�?
       switch(cmd_char)
         
       {
@@ -420,11 +420,11 @@ void StartLogicTask(void const * argument)
           if(g_ucMode > 5) g_ucMode = 1;
           break;
         case 'K': g_ucMode = 0; break;
-        case 'H': // 转向指令可以直接改全局目标�?
-          mpu6050Movement.targer_val += 90;
+        case 'H':
+          mpu6050Movement.target_val += 90;
           break;
         case 'I':
-          mpu6050Movement.targer_val -= 90;
+          mpu6050Movement.target_val -= 90;
       }
     }
     switch (g_ucMode) {
@@ -494,7 +494,7 @@ void StartLogicTask(void const * argument)
           motorPidSetSpeed(0, 0);   osDelay(100);  // 停车
           motorPidSetSpeed(-1.5, -1.5); osDelay(300); // 后退
           motorPidSetSpeed(2, -2);  osDelay(400);  // 右转
-          motorPidSetSpeed(0, 0);   osDelay(200);  // 停一下观�?
+          motorPidSetSpeed(0, 0);   osDelay(200);  // 停一下观�?
         }
         break;
 
@@ -557,8 +557,7 @@ void StartTask06(void const * argument)
   for(;;)
   {
   // =========================================================
-    //  �?0 行�::显示 模式 �?电池电压
-    //  格式�?"M:1  Bat:7.4V"
+
     // =========================================================
     // ADC读取放在这里或者SensorTask都可以，假�比较快直接读
     sprintf(oled_buf, "M:%d Bat:%.1fV", g_ucMode, adcGetBatteryVoltage());
@@ -569,33 +568,33 @@ void StartTask06(void const * argument)
     taskEXIT_CRITICAL();
 
     // =========================================================
-    //  �?1 行�::显示 左右电机目标速度
-    //  格式�?"L:100 R:100" (预留空格防止数字变短后有残留)
+    //  �?1 行�::显示 左右电机目标速度
+    //  格式�?"L:100 R:100" (预留空格防止数字变短后有残留)
     // =========================================================
-    // %.0f 表示不显示小数，节省空间�?-4.0f 表�ʾ左对齐占4�?
+    // %.0f 表示不显示小数，节省空间�?-4.0f 表�ʾ左对齐占4�?
     sprintf(oled_buf, "L:%-4.0f R:%-4.0f", Motor1Speed, Motor2Speed);
     OLED_ShowString(0, 1, (uint8_t *)oled_buf, 12);
 
 
     // =========================================================
-    //  �?2 行�::显示 超�?波距�?�?里��?    //  格式�?"D:120cm M:1.2"
+    //  �?2 行�::显示 超�?波距�?�?里��?    //  格式�?"D:120cm M:1.2"
     // =========================================================
-    // g_dist �?SensorTask 更新�d��? (typo)
+    // g_dist �?SensorTask 更新�d��? (typo)
     sprintf(oled_buf, "D:%-3.0fcm M:%.1f", snap.dist, mile);
     OLED_ShowString(0, 2, (uint8_t *)oled_buf, 12);
 
 
     // =========================================================
-    //  �?3 行�::动态区�?(根据模式显示特有信息)
+    //  �?3 行�::动态区�?(根据模式显示特有信息)
     // =========================================================
     if(g_ucMode == 5)
     {
-        // 如果�?K210 模式，显示视觉坐�?
+        // 如果�?K210 模式，显示视觉坐�?
         sprintf(oled_buf, "K210 X: %d   ", Vision_x); //后面加空格是为了覆��掉旧�?
     }
     else if(g_ucMode == 4)
     {
-        // 如果�?6050 走直线模式，�R��ʾ Yaw 角度
+        // 如果�?6050 走直线模式，�R��ʾ Yaw 角度
         sprintf(oled_buf, "Yaw: %-5.1f   ", snap.yaw);
     }
     else
@@ -607,7 +606,7 @@ void StartTask06(void const * argument)
 
 
     // =========================================================
-    //  串口发�?(可选，不想刷屏可以把这里注�???, Actually maybe not
+    //  串口发�?(可选，不想刷屏可以把这里注�???, Actually maybe not
     // =========================================================
     // sprintf(oled_buf, "Mode:%d Dist:%.1f\r\n", g_ucMode, g_dist);
     // HAL_UART_Transmit(&huart3, (uint8_t *)oled_buf, strlen(oled_buf), 10);

@@ -104,7 +104,7 @@ void motorSpeedCut(void)
     }
     else
     {
-        g_TargetSpeed = 0; // 减到底就�?
+        g_TargetSpeed = 0;
     }
 
 
