@@ -20,6 +20,7 @@
 #include "main.h"
 #include "cmsis_os.h"
 #include "adc.h"
+#include "iwdg.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
@@ -34,6 +35,8 @@
 #include "HC_SR04.h"
 #include "mpu6050.h"
 #include "inv_mpu.h"
+#include "FreeRTOS.h"
+#include "task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,6 +59,8 @@
 /* USER CODE BEGIN PV */
 extern uint8_t g_ucusrtrecivedate;
 extern uint8_t  RxBuffer;
+extern volatile TickType_t g_last_cmd_tick;
+extern volatile TickType_t g_last_vision_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -119,6 +124,7 @@ int main(void)
   MX_ADC2_Init();
   MX_USART3_UART_Init();
   MX_USART2_UART_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
 
   // --- 1. 电机与编码器启动 ---
@@ -174,10 +180,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -220,6 +227,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     // 直接把收到的字符丢进队列，不做逻辑判断
     xQueueSendFromISR(CommandQueueHandle, &g_ucusrtrecivedate, &xHigherPriorityTaskWoken);
+    g_last_cmd_tick = xTaskGetTickCountFromISR();
 
     // 继续接收
     HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
@@ -254,6 +262,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
         // 【关键改变】发送结构体到队列，而不是直接改全局变量
         xQueueSendFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
+        g_last_vision_tick = xTaskGetTickCountFromISR();
       }
       rx_state = 0;
     }

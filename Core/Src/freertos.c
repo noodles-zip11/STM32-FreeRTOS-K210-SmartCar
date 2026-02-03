@@ -22,7 +22,7 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include "queue.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "oled.h"
@@ -36,6 +36,8 @@
 #include "tim.h"
 #include "gpio.h"
 #include "adc.h"
+#include "iwdg.h"
+#include "queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,6 +68,9 @@ float mile =0.00 ;
 
 char OledString[50];
 char Usart3String[50];
+
+volatile TickType_t g_last_cmd_tick = 0;
+volatile TickType_t g_last_vision_tick = 0;
 
 
 
@@ -175,10 +180,144 @@ typedef struct {
   uint8_t long_sent;
 } KeyState;
 
+static MenuItem g_menu_items[] = {
+  {"Root", MENU_TYPE_SUBMENU, -1, 1, 5, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"Status", MENU_TYPE_ACTION, 0, 0, 0, MENU_VALUE_NONE, 0, 0, 0, 0, 1},
+  {"Mode", MENU_TYPE_PARAM, 0, 0, 0, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
+  {"PID M1", MENU_TYPE_SUBMENU, 0, 6, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"PID M2", MENU_TYPE_SUBMENU, 0, 9, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"PID Track", MENU_TYPE_SUBMENU, 0, 12, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"M1 Kp", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"M1 Ki", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"M1 Kd", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"M2 Kp", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"M2 Ki", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"M2 Kd", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"TR Kp", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"TR Ki", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"TR Kd", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0}
+};
+
 void avoid_set_state(AvoidState s, uint32_t ms)
 {
   avoid_state = s;
   avoid_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+}
+
+static int32_t ui_get_int(const MenuItem *item)
+{
+  if (item->value_type == MENU_VALUE_INT8) return *(int8_t *)item->value_ptr;
+  if (item->value_type == MENU_VALUE_INT16) return *(int16_t *)item->value_ptr;
+  if (item->value_type == MENU_VALUE_INT32) return *(int32_t *)item->value_ptr;
+  return 0;
+}
+
+static void ui_set_int(const MenuItem *item, int32_t v)
+{
+  if (item->value_type == MENU_VALUE_INT8) *(int8_t *)item->value_ptr = (int8_t)v;
+  else if (item->value_type == MENU_VALUE_INT16) *(int16_t *)item->value_ptr = (int16_t)v;
+  else if (item->value_type == MENU_VALUE_INT32) *(int32_t *)item->value_ptr = (int32_t)v;
+}
+
+static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debounce_ms,
+                          uint32_t long_ms, uint8_t *short_evt, uint8_t *long_evt)
+{
+  if (raw != k->last_raw)
+  {
+    k->last_raw = raw;
+    k->last_change = now;
+  }
+  else if ((now - k->last_change) >= debounce_ms && raw != k->stable)
+  {
+    k->stable = raw;
+    if (k->stable)
+    {
+      k->press_tick = now;
+      k->long_sent = 0;
+    }
+    else
+    {
+      if (!k->long_sent) *short_evt = 1;
+    }
+  }
+
+  if (k->stable && !k->long_sent && (now - k->press_tick) >= long_ms)
+  {
+    *long_evt = 1;
+    k->long_sent = 1;
+  }
+}
+
+static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
+{
+  if (item->value_type == MENU_VALUE_FLOAT)
+  {
+    snprintf(buf, len, "%.2f", *(float *)item->value_ptr);
+  }
+  else if (item->value_type != MENU_VALUE_NONE)
+  {
+    snprintf(buf, len, "%ld", (long)ui_get_int(item));
+  }
+  else
+  {
+    buf[0] = '\0';
+  }
+}
+
+static uint8_t ui_find_child_cursor(uint8_t parent, uint8_t child_index)
+{
+  uint8_t start = g_menu_items[parent].child_start;
+  uint8_t count = g_menu_items[parent].child_count;
+  uint8_t i;
+  for (i = 0; i < count; i++)
+  {
+    if (start + i == child_index) return i;
+  }
+  return 0;
+}
+
+static void ui_draw_menu(uint8_t parent, uint8_t cursor, uint8_t view_offset,
+                         uint8_t edit_mode, uint8_t edit_index)
+{
+  uint8_t start = g_menu_items[parent].child_start;
+  uint8_t count = g_menu_items[parent].child_count;
+  uint8_t line;
+  OLED_Clear();
+  for (line = 0; line < 4; line++)
+  {
+    uint8_t idx = start + view_offset + line;
+    if (idx >= start + count) break;
+    MenuItem *item = &g_menu_items[idx];
+    char linebuf[24];
+    char valbuf[12];
+    char mark = ' ';
+    if (idx == start + cursor) mark = '>';
+    if (edit_mode && idx == edit_index) mark = '*';
+    if (item->type == MENU_TYPE_PARAM)
+    {
+      ui_format_value(item, valbuf, sizeof(valbuf));
+      snprintf(linebuf, sizeof(linebuf), "%c%s:%s", mark, item->name, valbuf);
+    }
+    else
+    {
+      snprintf(linebuf, sizeof(linebuf), "%c%s", mark, item->name);
+    }
+    OLED_ShowString(0, line, (uint8_t *)linebuf, 12);
+  }
+}
+
+static void ui_draw_status(void)
+{
+  char line[32];
+  OLED_Clear();
+  snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
+  OLED_ShowString(0, 0, (uint8_t *)line, 12);
+  snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
+  OLED_ShowString(0, 1, (uint8_t *)line, 12);
+  snprintf(line, sizeof(line), "D:%.1f M:%.1f", g_sensor_snapshot.dist, mile);
+  OLED_ShowString(0, 2, (uint8_t *)line, 12);
+  snprintf(line, sizeof(line), "Yaw:%.1f", g_sensor_snapshot.yaw);
+  OLED_ShowString(0, 3, (uint8_t *)line, 12);
 }
 /* USER CODE END PM */
 
@@ -207,12 +346,17 @@ void StartTask06(void const * argument);
 
 /* USER CODE END FunctionPrototypes */
 
+void StartDefaultTask(void const * argument);
+void StartControlTask(void const * argument);
+void StartSensorTask(void const * argument);
+void StartVisionTask(void const * argument);
+void StartLogicTask(void const * argument);
+void StartTask06(void const * argument);
+
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /* GetIdleTaskMemory prototype (linked to static allocation support) */
-void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
-                                    StackType_t **ppxIdleTaskStackBuffer,
-                                    uint32_t *pulIdleTaskStackSize );
+void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize );
 
 /* USER CODE BEGIN GET_IDLE_TASK_MEMORY */
 static StaticTask_t xIdleTaskTCBBuffer;
@@ -257,42 +401,31 @@ void MX_FREERTOS_Init(void) {
                                          ucVisionQueueStorage, &xVisionQueueBuffer);
   MotorTargetQueueHandle = xQueueCreateStatic(1, sizeof(MotorTarget_t),
                                               ucMotorTargetQueueStorage, &xMotorTargetQueueBuffer);
-
   configASSERT(CommandQueueHandle != NULL);
   configASSERT(VisionQueueHandle != NULL);
   configASSERT(MotorTargetQueueHandle != NULL);
 
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
-  /* USER CODE END RTOS_QUEUES */
-
   /* Create the thread(s) */
-  /* definition and creation of defaultTask */
   osThreadStaticDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 128,
                     xDefaultTaskStack, &xDefaultTaskTCB);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
-  /* definition and creation of ControlTask */
   osThreadStaticDef(ControlTask, StartControlTask, osPriorityHigh, 0, 512,
                     xControlTaskStack, &xControlTaskTCB);
   ControlTaskHandle = osThreadCreate(osThread(ControlTask), NULL);
 
-  /* definition and creation of SensorTask */
   osThreadStaticDef(SensorTask, StartSensorTask, osPriorityAboveNormal, 0, 128,
                     xSensorTaskStack, &xSensorTaskTCB);
   SensorTaskHandle = osThreadCreate(osThread(SensorTask), NULL);
 
-  /* definition and creation of VisionTask */
   osThreadStaticDef(VisionTask, StartVisionTask, osPriorityNormal, 0, 128,
                     xVisionTaskStack, &xVisionTaskTCB);
   VisionTaskHandle = osThreadCreate(osThread(VisionTask), NULL);
 
-  /* definition and creation of LogicTask */
   osThreadStaticDef(LogicTask, StartLogicTask, osPriorityNormal, 0, 128,
                     xLogicTaskStack, &xLogicTaskTCB);
   LogicTaskHandle = osThreadCreate(osThread(LogicTask), NULL);
 
-  /* definition and creation of StartUITask */
   osThreadStaticDef(StartUITask, StartTask06, osPriorityLow, 0, 256,
                     xStartUITaskStack, &xStartUITaskTCB);
   StartUITaskHandle = osThreadCreate(osThread(StartUITask), NULL);
@@ -300,6 +433,7 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
+
 }
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -320,6 +454,13 @@ void StartDefaultTask(void const * argument)
   /* USER CODE END StartDefaultTask */
 }
 
+/* USER CODE BEGIN Header_StartControlTask */
+/**
+* @brief Function implementing the ControlTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartControlTask */
 void StartControlTask(void const * argument)
 {
   /* USER CODE BEGIN StartControlTask */
@@ -370,6 +511,7 @@ void StartControlTask(void const * argument)
       PID_realize(&pidMotor1Speed, m1_speed_f, dt),
       PID_realize(&pidMotor2Speed, m2_speed_f, dt)
     );
+    HAL_IWDG_Refresh(&hiwdg);
 
 
     // mile+= 0.02*Motor1Speed*22;
@@ -474,11 +616,14 @@ void StartLogicTask(void const * argument)
   const float dt = 0.01f;
 
 
+  g_last_cmd_tick = xTaskGetTickCount();
+  g_last_vision_tick = g_last_cmd_tick;
 
   /* Infinite loop */
   for(;;)
   {
 
+    TickType_t now = xTaskGetTickCount();
     taskENTER_CRITICAL();          // 1. 进入临界区，禁止被打断
     g_sensor_snapshot.seq++;       // 2. 版本号 +1 (变奇数)，标记“正在写”
     g_sensor_snapshot = snap;      // 3. 复制全部数据 (结构体赋值)
@@ -518,6 +663,14 @@ void StartLogicTask(void const * argument)
           mpu6050Movement.target_val -= 90;
       }
     }
+    if ((now - g_last_cmd_tick) > pdMS_TO_TICKS(500)) {
+      motorPidSetSpeed(0, 0);
+      g_ucMode = 0;
+    }
+    if ((now - g_last_vision_tick) > pdMS_TO_TICKS(500)) {
+      Vision_Status = 0;
+    }
+
     switch (g_ucMode) {
       case 0:
         motorPidSetSpeed(0,0);
@@ -585,11 +738,11 @@ void StartLogicTask(void const * argument)
         TickType_t  now = xTaskGetTickCount();
 
         if(snap.dist > 20)
-          {
-            avoid_state = AVOID_IDLE;
-            motorPidSetSpeed(2, 2);
-            break;
-          }
+        {
+          avoid_state = AVOID_IDLE;
+          motorPidSetSpeed(2, 2);
+          break;
+        }
         switch (avoid_state)
         {
           case AVOID_IDLE:
@@ -655,143 +808,13 @@ void StartLogicTask(void const * argument)
 
         motorPidSetSpeed(g_fMPU6050YawMovePidOut1,g_fMPU6050YawMovePidOut2);
         break;
+        
     }
     osDelay(50);
   }
   /* USER CODE END StartLogicTask */
 }
 
-static MenuItem g_menu_items[] = {
-  {"Root", MENU_TYPE_SUBMENU, -1, 1, 5, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"Status", MENU_TYPE_ACTION, 0, 0, 0, MENU_VALUE_NONE, 0, 0, 0, 0, 1},
-  {"Mode", MENU_TYPE_PARAM, 0, 0, 0, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
-  {"PID M1", MENU_TYPE_SUBMENU, 0, 6, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID M2", MENU_TYPE_SUBMENU, 0, 9, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID Track", MENU_TYPE_SUBMENU, 0, 12, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"M1 Kp", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"M1 Ki", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"M1 Kd", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kd, 0.1f, -50.0f, 50.0f, 0},
-  {"M2 Kp", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"M2 Ki", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"M2 Kd", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kd, 0.1f, -50.0f, 50.0f, 0},
-  {"TR Kp", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"TR Ki", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"TR Kd", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0}
-};
-
-static int32_t ui_get_int(const MenuItem *item)
-{
-  if (item->value_type == MENU_VALUE_INT8) return *(int8_t *)item->value_ptr;
-  if (item->value_type == MENU_VALUE_INT16) return *(int16_t *)item->value_ptr;
-  if (item->value_type == MENU_VALUE_INT32) return *(int32_t *)item->value_ptr;
-  return 0;
-}
-
-static void ui_set_int(const MenuItem *item, int32_t v)
-{
-  if (item->value_type == MENU_VALUE_INT8) *(int8_t *)item->value_ptr = (int8_t)v;
-  else if (item->value_type == MENU_VALUE_INT16) *(int16_t *)item->value_ptr = (int16_t)v;
-  else if (item->value_type == MENU_VALUE_INT32) *(int32_t *)item->value_ptr = (int32_t)v;
-}
-
-static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debounce_ms, uint32_t long_ms, uint8_t *short_evt, uint8_t *long_evt)
-{
-  if (raw != k->last_raw)
-  {
-    k->last_raw = raw;
-    k->last_change = now;
-  }
-  else if ((now - k->last_change) >= debounce_ms && raw != k->stable)
-  {
-    k->stable = raw;
-    if (k->stable)
-    {
-      k->press_tick = now;
-      k->long_sent = 0;
-    }
-    else
-    {
-      if (!k->long_sent) *short_evt = 1;
-    }
-  }
-
-  if (k->stable && !k->long_sent && (now - k->press_tick) >= long_ms)
-  {
-    *long_evt = 1;
-    k->long_sent = 1;
-  }
-}
-
-static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
-{
-  if (item->value_type == MENU_VALUE_FLOAT)
-  {
-    snprintf(buf, len, "%.2f", *(float *)item->value_ptr);
-  }
-  else if (item->value_type != MENU_VALUE_NONE)
-  {
-    snprintf(buf, len, "%ld", (long)ui_get_int(item));
-  }
-  else
-  {
-    buf[0] = '\0';
-  }
-}
-
-static uint8_t ui_find_child_cursor(uint8_t parent, uint8_t child_index)
-{
-  uint8_t start = g_menu_items[parent].child_start;
-  uint8_t count = g_menu_items[parent].child_count;
-  uint8_t i;
-  for (i = 0; i < count; i++)
-  {
-    if (start + i == child_index) return i;
-  }
-  return 0;
-}
-
-static void ui_draw_menu(uint8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index)
-{
-  uint8_t start = g_menu_items[parent].child_start;
-  uint8_t count = g_menu_items[parent].child_count;
-  uint8_t line;
-  OLED_Clear();
-  for (line = 0; line < 4; line++)
-  {
-    uint8_t idx = start + view_offset + line;
-    if (idx >= start + count) break;
-    MenuItem *item = &g_menu_items[idx];
-    char linebuf[24];
-    char valbuf[12];
-    char mark = ' ';
-    if (idx == start + cursor) mark = '>';
-    if (edit_mode && idx == edit_index) mark = '*';
-    if (item->type == MENU_TYPE_PARAM)
-    {
-      ui_format_value(item, valbuf, sizeof(valbuf));
-      snprintf(linebuf, sizeof(linebuf), "%c%s:%s", mark, item->name, valbuf);
-    }
-    else
-    {
-      snprintf(linebuf, sizeof(linebuf), "%c%s", mark, item->name);
-    }
-    OLED_ShowString(0, line, (uint8_t *)linebuf, 12);
-  }
-}
-
-static void ui_draw_status(void)
-{
-  char line[32];
-  OLED_Clear();
-  snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
-  OLED_ShowString(0, 0, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
-  OLED_ShowString(0, 1, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "D:%.1f M:%.1f", g_sensor_snapshot.dist, mile);
-  OLED_ShowString(0, 2, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "Yaw:%.1f", g_sensor_snapshot.yaw);
-  OLED_ShowString(0, 3, (uint8_t *)line, 12);
-}
 /* USER CODE BEGIN Header_StartTask06 */
 /**
 * @brief Function implementing the StartUITask thread.
@@ -965,6 +988,7 @@ void StartTask06(void const * argument)
 
 void vApplicationMallocFailedHook(void)
 {
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   taskDISABLE_INTERRUPTS();
   for(;;)
   {
@@ -975,6 +999,7 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
   (void)xTask;
   (void)pcTaskName;
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   taskDISABLE_INTERRUPTS();
   for(;;)
   {
@@ -982,9 +1007,4 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 }
 
 /* USER CODE END Application */
-
-
-
-
-
 
