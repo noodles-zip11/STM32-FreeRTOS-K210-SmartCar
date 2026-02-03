@@ -95,16 +95,17 @@ float  k210PidOut2 = 0.00f;
 
 float pitch,roll,yaw;
 
-uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
-int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
-int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
-uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
+uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
+int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
+int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
+uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
 
 // --- 状态机相关变量 ---
 uint8_t rx_state = 0;      // 协议解析状�?
-uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
-uint8_t rx_data_cnt = 0;   // 数据计数�?
+uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
+uint8_t rx_data_cnt = 0;   // 数据计数�?
 typedef struct {
+  uint32_t seq;
   uint8_t hw[4];
   float dist;
   float sr04;
@@ -112,6 +113,18 @@ typedef struct {
   float roll;
   float yaw;
 } SensorSnapshot;
+
+typedef enum {
+  AVOID_IDLE = 0,
+  AVOID_STOP,
+  AVOID_BACK,
+  AVOID_TURN,
+  AVOID_PAUSE
+}AvoidState;
+
+AvoidState avoid_state = AVOID_IDLE;
+TickType_t avoid_deadline = 0;
+
 
 static SensorSnapshot g_sensor_snapshot;
 
@@ -161,6 +174,12 @@ typedef struct {
   uint32_t press_tick;
   uint8_t long_sent;
 } KeyState;
+
+void avoid_set_state(AvoidState s, uint32_t ms)
+{
+  avoid_state = s;
+  avoid_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+}
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -306,6 +325,14 @@ void StartControlTask(void const * argument)
   /* USER CODE BEGIN StartControlTask */
   TickType_t lastWakeTime = xTaskGetTickCount();
   MotorTarget_t target;
+  float dt = 0.001f;
+
+  static float m1_speed_f = 0.0f;
+  static float m2_speed_f = 0.0f;
+  //更精准的求 dt
+  // TickType_t now = xTaskGetTickCount();
+  // float dt = (now - lastTick) * 0.001f;
+  // lastTick = now;
 
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL); // 开启编码器
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
@@ -324,12 +351,31 @@ void StartControlTask(void const * argument)
     __HAL_TIM_SET_COUNTER(&htim4,0);
     __HAL_TIM_SET_COUNTER(&htim2,0);
 
-    Motor1Speed = (float)Encoder1Count * 100 /9.6/11/4;
-    Motor2Speed = -(float)Encoder2Count * 100 /9.6/11/4;
+    // Motor1Speed = (float)Encoder1Count * 100 /9.6/11/4;
+    // Motor2Speed = -(float)Encoder2Count * 100 /9.6/11/4;
 
-    mile+= 0.02*Motor1Speed*22;
 
-    Motor_Set(PID_realize(&pidMotor1Speed,Motor1Speed),PID_realize(&pidMotor2Speed,Motor2Speed));
+    float rev1 = (float)Encoder1Count / (ENC_PPR * GEAR_RATIO);
+    float rev2 = (float)Encoder2Count / (ENC_PPR * GEAR_RATIO);
+
+    Motor1Speed = rev1 / dt;
+    Motor2Speed = -rev2 / dt;
+
+    // 一阶低通
+    m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
+    m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
+
+    // PID 用滤波后的
+    Motor_Set(
+      PID_realize(&pidMotor1Speed, m1_speed_f, dt),
+      PID_realize(&pidMotor2Speed, m2_speed_f, dt)
+    );
+
+
+    // mile+= 0.02*Motor1Speed*22;
+    //
+    //
+    // Motor_Set(PID_realize(&pidMotor1Speed,Motor1Speed,dt),PID_realize(&pidMotor2Speed,Motor2Speed,dt));
 
     vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(10));
   }
@@ -397,10 +443,18 @@ void StartSensorTask(void const * argument)
 void StartVisionTask(void const * argument)
 {
   /* USER CODE BEGIN StartVisionTask */
+
+  VisionData_t data;
   /* Infinite loop */
   for(;;)
   {
-    osDelay(10);
+    if (xQueueReceive(VisionQueueHandle, &data, pdMS_TO_TICKS(20)) == pdTRUE)
+    {
+      // 这里处理 data.x / data.y
+      // 例如更新目标或者保存到全局结构体
+      // last_vision_tick = xTaskGetTickCount();
+    }
+    //osDelay(10);
   }
   /* USER CODE END StartVisionTask */
 }
@@ -417,16 +471,31 @@ void StartLogicTask(void const * argument)
   /* USER CODE BEGIN StartLogicTask */
   uint8_t cmd_char;
   SensorSnapshot snap;
+  const float dt = 0.01f;
+
+
+
   /* Infinite loop */
   for(;;)
   {
-    taskENTER_CRITICAL();
-    snap = g_sensor_snapshot;
-    taskEXIT_CRITICAL();
+
+    taskENTER_CRITICAL();          // 1. 进入临界区，禁止被打断
+    g_sensor_snapshot.seq++;       // 2. 版本号 +1 (变奇数)，标记“正在写”
+    g_sensor_snapshot = snap;      // 3. 复制全部数据 (结构体赋值)
+    g_sensor_snapshot.seq++;       // 4. 版本号 +1 (变偶数)，标记“写完了”
+    taskEXIT_CRITICAL();           // 5. 退出临界区
+
+    SensorSnapshot snap1, snap2;
+    do {
+      snap1 = g_sensor_snapshot; // 1. 尝试读第一次
+      snap2 = g_sensor_snapshot; // 2. 尝试读第二次
+      // 3. 校验循环条件：
+    } while ((snap1.seq != snap2.seq) || (snap1.seq & 1));
+
 
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
     {
-      // 收到指令，开始干�?
+      // 收到指令，开始干�?
       switch(cmd_char)
         
       {
@@ -450,6 +519,8 @@ void StartLogicTask(void const * argument)
       }
     }
     switch (g_ucMode) {
+      case 0:
+        motorPidSetSpeed(0,0);
 
       case 1:
         if (snap.hw[0] == 0 && snap.hw[1] == 0 && snap.hw[2] == 0 && snap.hw[3] == 0)
@@ -493,7 +564,7 @@ void StartLogicTask(void const * argument)
           g_thisstate = -3;
         }
 
-        g_pid_out = PID_realize(&pid_pidHW_Tracking,g_thisstate);
+        g_pid_out = PID_realize(&pid_pidHW_Tracking,g_thisstate,dt);
 
         g_pid_out1 = 3 + g_pid_out;
         g_pid_out2 = 3 - g_pid_out;
@@ -510,13 +581,42 @@ void StartLogicTask(void const * argument)
 
 
       case 2:
-        if(snap.dist > 20) {
-          motorPidSetSpeed(2, 2);
-        } else {
-          motorPidSetSpeed(0, 0);   osDelay(100);  // 停车
-          motorPidSetSpeed(-1.5, -1.5); osDelay(300); // 后退
-          motorPidSetSpeed(2, -2);  osDelay(400);  // 右转
-          motorPidSetSpeed(0, 0);   osDelay(200);  // 停一下观�?
+
+        TickType_t  now = xTaskGetTickCount();
+
+        if(snap.dist > 20)
+          {
+            avoid_state = AVOID_IDLE;
+            motorPidSetSpeed(2, 2);
+            break;
+          }
+        switch (avoid_state)
+        {
+          case AVOID_IDLE:
+            motorPidSetSpeed(0, 0);
+            avoid_set_state(AVOID_BACK, 100); // 停车 100ms
+            break;
+
+          case AVOID_BACK:
+            if (now >= avoid_deadline) {
+              motorPidSetSpeed(-1.5f, -1.5f);
+              avoid_set_state(AVOID_TURN, 300); // 后退 300ms
+            }
+            break;
+
+          case AVOID_TURN:
+            if (now >= avoid_deadline) {
+              motorPidSetSpeed(2, -2);
+              avoid_set_state(AVOID_PAUSE, 400); // 右转 400ms
+            }
+            break;
+
+          case AVOID_PAUSE:
+            if (now >= avoid_deadline) {
+              motorPidSetSpeed(0, 0);
+              avoid_set_state(AVOID_IDLE, 200); // 停一下
+            }
+            break;
         }
         break;
 
@@ -542,7 +642,7 @@ void StartLogicTask(void const * argument)
 
 
       case 4:
-        g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, snap.yaw);
+        g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, snap.yaw,dt);
 
         g_fMPU6050YawMovePidOut1 = 1.5 + g_fMPU6050YawMovePidOut;
 
@@ -862,6 +962,7 @@ void StartTask06(void const * argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
 void vApplicationMallocFailedHook(void)
 {
   taskDISABLE_INTERRUPTS();

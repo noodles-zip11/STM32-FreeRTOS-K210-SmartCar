@@ -53,7 +53,6 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -91,6 +90,13 @@ void Error_Handler(void);
     int16_t x;
     int16_t y;
   } VisionData_t;
+
+
+#define ENC_PPR        44.0f   // 每圈脉冲数(按你的编码器实际)
+#define GEAR_RATIO     9.6f
+#define SAMPLE_MS      10.0f
+#define SPEED_LPF_A    0.2f    // 低通系数(0~1)
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

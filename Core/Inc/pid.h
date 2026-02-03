@@ -23,8 +23,7 @@ typedef struct
 float P_realize(tpid * pid,float actual_val);
 void PID_init(void);
 float PI_realize(tpid * pid,float actual_val);
-float PID_realize(tpid * pid,float actual_val);
-void PID_Reset(tpid * pid);
+float PID_realize(tpid * pid,float actual_val,float dt);
 
 
 #endif //CAR_PID_H

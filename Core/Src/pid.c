@@ -15,7 +15,6 @@ tpid k210motion;
 
 void PID_init(void)
 {
-    //输入0�?0，输�?-100�?
     pidMotor1Speed.actual_val=0.0;
     pidMotor1Speed.target_val=0.0;
     pidMotor1Speed.output_val=0.0;
@@ -125,7 +124,7 @@ float PI_realize(tpid * pid,float actual_val)
     return pid->actual_val;
 }
 
-float PID_realize(tpid * pid,float actual_val)
+float PID_realize(tpid * pid,float actual_val,float dt)
 {
     float d_raw;
     float i_candidate;
@@ -136,14 +135,15 @@ float PID_realize(tpid * pid,float actual_val)
     pid->actual_val = actual_val;
     pid->err = pid->target_val - pid->actual_val;
 
-    i_candidate = pid->err_sum + pid->err;
+    i_candidate = pid->err_sum + pid->err * dt;
     if (pid->max_iout > 0.0)
     {
         if (i_candidate > pid->max_iout) i_candidate = pid->max_iout;
         if (i_candidate < -pid->max_iout) i_candidate = -pid->max_iout;
     }
 
-    d_raw = pid->err - pid->err_last;
+    //修正d的 用滤波
+    d_raw = (pid->err - pid->err_last)/ dt ;
     pid->d_out += pid->d_filter_alpha * (d_raw - pid->d_out);
 
     output_raw = pid->kp * pid->err + pid->ki * i_candidate + pid->kd * pid->d_out;
