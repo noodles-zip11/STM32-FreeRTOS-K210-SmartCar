@@ -132,7 +132,7 @@ AvoidState avoid_state = AVOID_IDLE;
 TickType_t avoid_deadline = 0;
 
 
-static SensorSnapshot g_sensor_snapshot;
+static volatile SensorSnapshot g_sensor_snapshot;
 
 static StaticQueue_t xCommandQueueBuffer;
 static uint8_t ucCommandQueueStorage[10 * sizeof(uint8_t)];
@@ -307,17 +307,28 @@ static void ui_draw_menu(uint8_t parent, uint8_t cursor, uint8_t view_offset,
   }
 }
 
+static SensorSnapshot ui_read_snapshot(void)
+{
+  SensorSnapshot snap1, snap2;
+  do {
+    snap1 = g_sensor_snapshot;
+    snap2 = g_sensor_snapshot;
+  } while ((snap1.seq != snap2.seq) || (snap1.seq & 1));
+  return snap1;
+}
+
 static void ui_draw_status(void)
 {
   char line[32];
+  SensorSnapshot snap = ui_read_snapshot();
   OLED_Clear();
   snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
   OLED_ShowString(0, 0, (uint8_t *)line, 12);
   snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
   OLED_ShowString(0, 1, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "D:%.1f M:%.1f", g_sensor_snapshot.dist, mile);
+  snprintf(line, sizeof(line), "D:%.1f M:%.1f", snap.dist, mile);
   OLED_ShowString(0, 2, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "Yaw:%.1f", g_sensor_snapshot.yaw);
+  snprintf(line, sizeof(line), "Yaw:%.1f", snap.yaw);
   OLED_ShowString(0, 3, (uint8_t *)line, 12);
 }
 /* USER CODE END PM */
@@ -466,8 +477,9 @@ void StartControlTask(void const * argument)
 {
   /* USER CODE BEGIN StartControlTask */
   TickType_t lastWakeTime = xTaskGetTickCount();
+  TickType_t lastTick = lastWakeTime;
   MotorTarget_t target;
-  float dt = 0.001f;
+  float dt = 0.01f;
 
   static float m1_speed_f = 0.0f;
   static float m2_speed_f = 0.0f;
@@ -486,6 +498,11 @@ void StartControlTask(void const * argument)
       pidMotor1Speed.target_val = target.left;
       pidMotor2Speed.target_val = target.right;
     }
+
+    TickType_t now = xTaskGetTickCount();
+    dt = (now - lastTick) * 0.001f;
+    if (dt <= 0.0f) dt = 0.01f;
+    lastTick = now;
 
     Encoder1Count=(short)__HAL_TIM_GET_COUNTER(&htim4);
     Encoder2Count=(short)__HAL_TIM_GET_COUNTER(&htim2);
@@ -559,7 +576,9 @@ void StartSensorTask(void const * argument)
     }
 
     taskENTER_CRITICAL();
+    g_sensor_snapshot.seq++;
     g_sensor_snapshot = snap;
+    g_sensor_snapshot.seq++;
     g_read[0] = snap.hw[0];
     g_read[1] = snap.hw[1];
     g_read[2] = snap.hw[2];
@@ -614,7 +633,9 @@ void StartLogicTask(void const * argument)
   /* USER CODE BEGIN StartLogicTask */
   uint8_t cmd_char;
   SensorSnapshot snap;
-  const float dt = 0.01f;
+  TickType_t lastWakeTime = xTaskGetTickCount();
+  TickType_t lastTick = lastWakeTime;
+  float dt = 0.05f;
 
 
   g_last_cmd_tick = xTaskGetTickCount();
@@ -625,6 +646,9 @@ void StartLogicTask(void const * argument)
   {
     
     TickType_t now = xTaskGetTickCount();
+    dt = (now - lastTick) * 0.001f;
+    if (dt <= 0.0f) dt = 0.05f;
+    lastTick = now;
 
     SensorSnapshot snap1, snap2;
     do {
@@ -632,7 +656,7 @@ void StartLogicTask(void const * argument)
       snap2 = g_sensor_snapshot; // 2. 尝试读第二次
 
     } while ((snap1.seq != snap2.seq) || (snap1.seq & 1));
-    snap = snap2;
+    snap = snap1;
 
 
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
@@ -675,7 +699,9 @@ void StartLogicTask(void const * argument)
 
     switch (g_ucMode) {
       case 0:
-        motorPidSetSpeed(0,0);
+        if (!g_uart_manual_active) {
+          motorPidSetSpeed(0,0);
+        }
         break;
 
       case 1:
@@ -813,7 +839,7 @@ void StartLogicTask(void const * argument)
         break;
         
     }
-    osDelay(50);
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(50));
   }
   /* USER CODE END StartLogicTask */
 }

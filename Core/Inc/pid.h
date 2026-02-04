@@ -18,12 +18,14 @@ typedef struct
     float max_iout;
     float d_filter_alpha;
     float d_out;
+
 }tpid;
 
 float P_realize(tpid * pid,float actual_val);
 void PID_init(void);
 float PI_realize(tpid * pid,float actual_val);
 float PID_realize(tpid * pid,float actual_val,float dt);
+void PID_Reset(tpid * pid);
 
 
 #endif //CAR_PID_H
