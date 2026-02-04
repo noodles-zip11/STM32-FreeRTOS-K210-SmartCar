@@ -176,8 +176,8 @@ typedef enum { UI_VIEW_MENU=0, UI_VIEW_STATUS=1, UI_VIEW_EDIT=2 } UiView;
 typedef struct {
   uint8_t stable;
   uint8_t last_raw;
-  uint32_t last_change;
-  uint32_t press_tick;
+  TickType_t last_change;
+  TickType_t press_tick;
   uint8_t long_sent;
 } KeyState;
 
@@ -220,15 +220,15 @@ static void ui_set_int(const MenuItem *item, int32_t v)
   else if (item->value_type == MENU_VALUE_INT32) *(int32_t *)item->value_ptr = (int32_t)v;
 }
 
-static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debounce_ms,
-                          uint32_t long_ms, uint8_t *short_evt, uint8_t *long_evt)
+static void ui_key_update(KeyState *k, uint8_t raw, TickType_t now, TickType_t debounce_ticks,
+                          TickType_t long_ticks, uint8_t *short_evt, uint8_t *long_evt)
 {
   if (raw != k->last_raw)
   {
     k->last_raw = raw;
     k->last_change = now;
   }
-  else if ((now - k->last_change) >= debounce_ms && raw != k->stable)
+  else if ((now - k->last_change) >= debounce_ticks && raw != k->stable)
   {
     k->stable = raw;
     if (k->stable)
@@ -242,7 +242,7 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debou
     }
   }
 
-  if (k->stable && !k->long_sent && (now - k->press_tick) >= long_ms)
+  if (k->stable && !k->long_sent && (now - k->press_tick) >= long_ticks)
   {
     *long_evt = 1;
     k->long_sent = 1;
@@ -689,7 +689,7 @@ void StartLogicTask(void const * argument)
           mpu6050Movement.target_val -= 90;
       }
     }
-    if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(500)) {
+    if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(1000)) {
       motorPidSetSpeed(0, 0);
       g_uart_manual_active = 0;
     }
@@ -868,9 +868,10 @@ void StartTask06(void const * argument)
   int32_t edit_backup_i = 0;
   uint32_t last_draw = 0;
 
+  TickType_t lastWakeTime = xTaskGetTickCount();
   for(;;)
   {
-    uint32_t now = HAL_GetTick();
+    TickType_t now = xTaskGetTickCount();
     uint8_t key1_short = 0;
     uint8_t key1_long = 0;
     uint8_t key2_short = 0;
@@ -880,8 +881,8 @@ void StartTask06(void const * argument)
     uint8_t raw1 = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
     uint8_t raw2 = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
 
-    ui_key_update(&key1, raw1, now, 15, 400, &key1_short, &key1_long);
-    ui_key_update(&key2, raw2, now, 15, 400, &key2_short, &key2_long);
+    ui_key_update(&key1, raw1, now, pdMS_TO_TICKS(15), pdMS_TO_TICKS(400), &key1_short, &key1_long);
+    ui_key_update(&key2, raw2, now, pdMS_TO_TICKS(15), pdMS_TO_TICKS(400), &key2_short, &key2_long);
 
     if (view == UI_VIEW_MENU)
     {
@@ -940,7 +941,7 @@ void StartTask06(void const * argument)
         }
       }
 
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 100)
       {
         ui_draw_menu(current_parent, cursor, view_offset, 0, edit_index);
         last_draw = now;
@@ -991,7 +992,7 @@ void StartTask06(void const * argument)
         need_redraw = 1;
       }
 
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 100)
       {
         ui_draw_menu(current_parent, cursor, view_offset, 1, edit_index);
         last_draw = now;
@@ -1004,14 +1005,14 @@ void StartTask06(void const * argument)
         view = UI_VIEW_MENU;
         need_redraw = 1;
       }
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 100)
       {
         ui_draw_status();
         last_draw = now;
       }
     }
 
-    osDelay(20);
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(10));
   }
   /* USER CODE END StartTask06 */
 }
