@@ -71,6 +71,7 @@ char Usart3String[50];
 
 volatile TickType_t g_last_cmd_tick = 0;
 volatile TickType_t g_last_vision_tick = 0;
+volatile uint8_t g_uart_manual_active = 0;
 
 
 
@@ -641,6 +642,7 @@ void StartLogicTask(void const * argument)
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
     {
       // 收到指令，开始干�?
+      g_uart_manual_active = 1;
       switch(cmd_char)
         
       {
@@ -663,9 +665,8 @@ void StartLogicTask(void const * argument)
           mpu6050Movement.target_val -= 90;
       }
     }
-    if ((now - g_last_cmd_tick) > pdMS_TO_TICKS(500)) {
+    if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(500)) {
       motorPidSetSpeed(0, 0);
-      g_ucMode = 0;
     }
     if ((now - g_last_vision_tick) > pdMS_TO_TICKS(500)) {
       Vision_Status = 0;
@@ -942,6 +943,10 @@ void StartTask06(void const * argument)
           if (v > (int32_t)item->max) v = (int32_t)item->max;
           if (v < (int32_t)item->min) v = (int32_t)item->min;
           ui_set_int(item, v);
+          if (item->value_ptr == &g_ucMode)
+          {
+            g_uart_manual_active = 0;
+          }
         }
         need_redraw = 1;
       }
