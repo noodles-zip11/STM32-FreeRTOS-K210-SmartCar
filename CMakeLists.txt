@@ -59,6 +59,7 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/Src/niming.c
         Core/Src/oled.c
         Core/Src/pid.c
+        Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_iwdg.h
 )
 
 # Add STM32CubeMX generated sources
