@@ -471,7 +471,7 @@ void StartControlTask(void const * argument)
 
   static float m1_speed_f = 0.0f;
   static float m2_speed_f = 0.0f;
-  //更精准的求 dt
+  //更精准的�?dt
   // TickType_t now = xTaskGetTickCount();
   // float dt = (now - lastTick) * 0.001f;
   // lastTick = now;
@@ -503,11 +503,11 @@ void StartControlTask(void const * argument)
     Motor1Speed = rev1 / dt;
     Motor2Speed = -rev2 / dt;
 
-    // 一阶低通
+    // 一阶低�?
     m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
     m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
 
-    // PID 用滤波后的
+    // PID 用滤波后�?
     Motor_Set(
       PID_realize(&pidMotor1Speed, m1_speed_f, dt),
       PID_realize(&pidMotor2Speed, m2_speed_f, dt)
@@ -594,7 +594,7 @@ void StartVisionTask(void const * argument)
     if (xQueueReceive(VisionQueueHandle, &data, pdMS_TO_TICKS(20)) == pdTRUE)
     {
       // 这里处理 data.x / data.y
-      // 例如更新目标或者保存到全局结构体
+      // 例如更新目标或者保存到全局结构�?
       // last_vision_tick = xTaskGetTickCount();
     }
     //osDelay(10);
@@ -623,20 +623,16 @@ void StartLogicTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-
+    
     TickType_t now = xTaskGetTickCount();
-    taskENTER_CRITICAL();          // 1. 进入临界区，禁止被打断
-    g_sensor_snapshot.seq++;       // 2. 版本号 +1 (变奇数)，标记“正在写”
-    g_sensor_snapshot = snap;      // 3. 复制全部数据 (结构体赋值)
-    g_sensor_snapshot.seq++;       // 4. 版本号 +1 (变偶数)，标记“写完了”
-    taskEXIT_CRITICAL();           // 5. 退出临界区
 
     SensorSnapshot snap1, snap2;
     do {
-      snap1 = g_sensor_snapshot; // 1. 尝试读第一次
+      snap1 = g_sensor_snapshot;
       snap2 = g_sensor_snapshot; // 2. 尝试读第二次
-      // 3. 校验循环条件：
+
     } while ((snap1.seq != snap2.seq) || (snap1.seq & 1));
+    snap = snap2;
 
 
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
@@ -656,8 +652,12 @@ void StartLogicTask(void const * argument)
         case 'J':
           g_ucMode++;
           if(g_ucMode > 5) g_ucMode = 1;
+          g_uart_manual_active = 0;
           break;
-        case 'K': g_ucMode = 0; break;
+        case 'K':
+          g_ucMode = 0;
+          g_uart_manual_active = 0;
+          break;
         case 'H':
           mpu6050Movement.target_val += 90;
           break;
@@ -667,6 +667,7 @@ void StartLogicTask(void const * argument)
     }
     if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(500)) {
       motorPidSetSpeed(0, 0);
+      g_uart_manual_active = 0;
     }
     if ((now - g_last_vision_tick) > pdMS_TO_TICKS(500)) {
       Vision_Status = 0;
@@ -675,6 +676,7 @@ void StartLogicTask(void const * argument)
     switch (g_ucMode) {
       case 0:
         motorPidSetSpeed(0,0);
+        break;
 
       case 1:
         if (snap.hw[0] == 0 && snap.hw[1] == 0 && snap.hw[2] == 0 && snap.hw[3] == 0)
@@ -768,7 +770,7 @@ void StartLogicTask(void const * argument)
           case AVOID_PAUSE:
             if (now >= avoid_deadline) {
               motorPidSetSpeed(0, 0);
-              avoid_set_state(AVOID_IDLE, 200); // 停一下
+              avoid_set_state(AVOID_IDLE, 200); // 停一�?
             }
             break;
         }
