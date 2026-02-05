@@ -60,7 +60,6 @@
 extern uint8_t g_ucusrtrecivedate;
 extern uint8_t  RxBuffer;
 extern volatile TickType_t g_last_cmd_tick;
-extern volatile TickType_t g_last_vision_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -262,7 +261,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
         // 【关键改变】发送结构体到队列，而不是直接改全局变量
         xQueueSendFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
-        g_last_vision_tick = xTaskGetTickCountFromISR();
       }
       rx_state = 0;
     }

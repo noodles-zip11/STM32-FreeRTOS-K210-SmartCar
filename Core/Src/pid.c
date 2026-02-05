@@ -9,7 +9,6 @@ tpid pidMotor2Speed;
 tpid pid_pidHW_Tracking;
 tpid pidFollow;
 tpid mpu6050Movement ;
-tpid k210motion;
 
 
 
@@ -86,20 +85,6 @@ void PID_init(void)
     mpu6050Movement.d_filter_alpha=0.2;
     mpu6050Movement.d_out=0.0;
 
-
-    k210motion.actual_val=0.0;
-    k210motion.target_val=160.0;
-    k210motion.output_val=0.0;
-    k210motion.err=0.0;
-    k210motion.err_last=0.0;
-    k210motion.err_sum=0.0;
-    k210motion.kd=0.1;
-    k210motion.ki=0.0;
-    k210motion.kp=0.02;
-    k210motion.max_output=100.0;
-    k210motion.max_iout=500.0;
-    k210motion.d_filter_alpha=0.2;
-    k210motion.d_out=0.0;
 
 }
 
