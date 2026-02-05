@@ -51,6 +51,10 @@ double p = 0.0;
 double i = 0.0;
 double d = 0.0;
 double a = 0.0;
+float g_line_base_speed = 2.0f;
+float g_line_search_speed = 1.5f;
+float g_line_max_speed = 4.0f;
+float g_line_min_speed = 0.5f;
 short Encoder1Count =0 ;
 short Encoder2Count =0 ;
 float Motor1Speed = 0.00;
@@ -561,63 +565,42 @@ void StartLogicTask(void const * argument)
         }
         break;
 
-      case 1:
-        if (snap.hw[0] == 0 && snap.hw[1] == 0 && snap.hw[2] == 0 && snap.hw[3] == 0)
+            case 1:
+      {
+        int8_t s0 = (g_read[0] == 1);
+        int8_t s1 = (g_read[1] == 1);
+        int8_t s2 = (g_read[2] == 1);
+        int8_t s3 = (g_read[3] == 1);
+        int8_t count = s0 + s1 + s2 + s3;
+        float base_speed = g_line_base_speed;
+
+        if (count > 0)
         {
-          //motorPidSetSpeed(1,1);
-          g_thisstate = 0;
+          int8_t sum = (-3 * s0) + (-1 * s1) + (1 * s2) + (3 * s3);
+          g_thisstate = sum / count;
+          base_speed = g_line_base_speed;
+        }
+        else
+        {
+          g_thisstate = (g_laststate >= 0) ? 3 : -3;
+          base_speed = g_line_search_speed;
         }
 
-        else if (snap.hw[0] == 0  && snap.hw[1] == 0 && snap.hw[2] == 1 && snap.hw[3] == 0)
-        {
-          //motorPidSetSpeed(2,1);
+        g_pid_out = PID_realize(&pid_pidHW_Tracking, g_thisstate, dt);
 
-          g_thisstate = 1;
-        }
-        else if (snap.hw[0] == 0  && snap.hw[1] == 1 && snap.hw[2] == 0 && snap.hw[3] == 0)
-        {
-          //motorPidSetSpeed(2,1);
+        g_pid_out1 = base_speed + g_pid_out;
+        g_pid_out2 = base_speed - g_pid_out;
 
-          g_thisstate = -1;
-        }
-        else if (snap.hw[0] == 0  && snap.hw[1] == 0 && snap.hw[2] == 0 && snap.hw[3] == 1)
-        {
-          //motorPidSetSpeed(3,1);
-          g_thisstate = 2;
-        }
-
-        else if (snap.hw[0] == 0  && snap.hw[1] == 0 && snap.hw[2] == 1 && snap.hw[3] == 1)
-        {
-          //motorPidSetSpeed(3,1);
-          g_thisstate = 3;
-        }
-        else if (snap.hw[0] == 1 && snap.hw[1] == 0 &&  snap.hw[2] == 0 && snap.hw[3] == 0)
-        {
-          //motorPidSetSpeed(3,1);
-          g_thisstate = -2;
-        }
-
-        else if (snap.hw[0] == 1  && snap.hw[1] == 1 && snap.hw[2] == 0 && snap.hw[3] == 0)
-        {
-          //motorPidSetSpeed(3,1);
-          g_thisstate = -3;
-        }
-
-        g_pid_out = PID_realize(&pid_pidHW_Tracking,g_thisstate,dt);
-
-        g_pid_out1 = 3 + g_pid_out;
-        g_pid_out2 = 3 - g_pid_out;
-
-        if (g_pid_out1>5) g_pid_out1 = 5;
-        if (g_pid_out2>5) g_pid_out2 = 5;
-        if (g_pid_out1<0) g_pid_out1 = 1;
-        if (g_pid_out2<0) g_pid_out2 = 1;
+        if (g_pid_out1 > g_line_max_speed) g_pid_out1 = g_line_max_speed;
+        if (g_pid_out2 > g_line_max_speed) g_pid_out2 = g_line_max_speed;
+        if (g_pid_out1 < g_line_min_speed) g_pid_out1 = g_line_min_speed;
+        if (g_pid_out2 < g_line_min_speed) g_pid_out2 = g_line_min_speed;
 
         motorPidSetSpeed(g_pid_out1, g_pid_out2);
 
-        g_laststate = g_thisstate ;
+        g_laststate = g_thisstate;
         break;
-
+      }
 
       case 2:
 
@@ -702,12 +685,13 @@ void StartLogicTask(void const * argument)
 }
 
 static MenuItem g_menu_items[] = {
-  {"Root", MENU_TYPE_SUBMENU, -1, 1, 5, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"Root", MENU_TYPE_SUBMENU, -1, 1, 6, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
   {"Status", MENU_TYPE_ACTION, 0, 0, 0, MENU_VALUE_NONE, 0, 0, 0, 0, 1},
   {"Mode", MENU_TYPE_PARAM, 0, 0, 0, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
-  {"PID M1", MENU_TYPE_SUBMENU, 0, 6, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID M2", MENU_TYPE_SUBMENU, 0, 9, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID Track", MENU_TYPE_SUBMENU, 0, 12, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"PID M1", MENU_TYPE_SUBMENU, 0, 7, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"PID M2", MENU_TYPE_SUBMENU, 0, 10, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"PID Track", MENU_TYPE_SUBMENU, 0, 13, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
+  {"Line", MENU_TYPE_SUBMENU, 0, 16, 4, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
   {"M1 Kp", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kp, 0.1f, -50.0f, 50.0f, 0},
   {"M1 Ki", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.ki, 0.01f, -10.0f, 10.0f, 0},
   {"M1 Kd", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kd, 0.1f, -50.0f, 50.0f, 0},
@@ -716,7 +700,11 @@ static MenuItem g_menu_items[] = {
   {"M2 Kd", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kd, 0.1f, -50.0f, 50.0f, 0},
   {"TR Kp", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kp, 0.1f, -50.0f, 50.0f, 0},
   {"TR Ki", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"TR Kd", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0}
+  {"TR Kd", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"Base Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_base_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Search Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_search_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Max Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_max_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Min Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_min_speed, 0.1f, 0.0f, 8.0f, 0}
 };
 
 static int32_t ui_get_int(const MenuItem *item)
@@ -827,9 +815,9 @@ static void ui_draw_status(void)
   OLED_ShowString(0, 0, (uint8_t *)line, 12);
   snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
   OLED_ShowString(0, 1, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "D:%.1f M:%.1f", g_sensor_snapshot.dist, mile);
+  snprintf(line, sizeof(line), "D:%.1f M:%.1f", dist, mile);
   OLED_ShowString(0, 2, (uint8_t *)line, 12);
-  snprintf(line, sizeof(line), "Yaw:%.1f", g_sensor_snapshot.yaw);
+  snprintf(line, sizeof(line), "Yaw:%.1f", yaw);
   OLED_ShowString(0, 3, (uint8_t *)line, 12);
 }
 /* USER CODE BEGIN Header_StartTask06 */
@@ -867,9 +855,8 @@ void StartTask06(void const * argument)
 
     uint8_t raw1 = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
     uint8_t raw2 = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
-
-    ui_key_update(&key1, raw1, now, 15, 400, &key1_short, &key1_long);
-    ui_key_update(&key2, raw2, now, 15, 400, &key2_short, &key2_long);
+    ui_key_update(&key1, raw1, now, 10, 600, &key1_short, &key1_long);
+    ui_key_update(&key2, raw2, now, 10, 600, &key2_short, &key2_long);
 
     if (view == UI_VIEW_MENU)
     {
@@ -928,7 +915,7 @@ void StartTask06(void const * argument)
         }
       }
 
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 500)
       {
         ui_draw_menu(current_parent, cursor, view_offset, 0, edit_index);
         last_draw = now;
@@ -975,7 +962,7 @@ void StartTask06(void const * argument)
         need_redraw = 1;
       }
 
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 300)
       {
         ui_draw_menu(current_parent, cursor, view_offset, 1, edit_index);
         last_draw = now;
@@ -988,14 +975,14 @@ void StartTask06(void const * argument)
         view = UI_VIEW_MENU;
         need_redraw = 1;
       }
-      if (need_redraw || (now - last_draw) > 200)
+      if (need_redraw || (now - last_draw) > 300)
       {
         ui_draw_status();
         last_draw = now;
       }
     }
 
-    osDelay(20);
+    osDelay(10);
   }
   /* USER CODE END StartTask06 */
 }
