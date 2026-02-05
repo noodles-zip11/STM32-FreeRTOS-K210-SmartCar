@@ -105,15 +105,15 @@ float  k210PidOut2 = 0.00f;
 
 float pitch,roll,yaw;
 
-uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
-int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
-int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
-uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
+uint8_t  RxBuffer;          // 临时存放串口收到的这1个字�?
+int16_t Vision_x = 0;      // 解析出来�?X 坐标 (给逻辑代码�?
+int16_t Vision_y = 0;      // 解析出来�?Y 坐标 (给逻辑代码�?
+uint8_t Vision_Status = 0; // 状态标记：1表示刚刚更新了数�?
 
 // --- 状态机相关变量 ---
 uint8_t rx_state = 0;      // 协议解析状�?
-uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
-uint8_t rx_data_cnt = 0;   // 数据计数�?
+uint8_t rx_data_buf[4];    // 临时存放 X�? X�? Y�? Y�?
+uint8_t rx_data_cnt = 0;   // 数据计数�?
 typedef struct {
   uint32_t seq;
   uint8_t hw[4];
@@ -168,22 +168,32 @@ static StackType_t xStartUITaskStack[384];
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define UI_LIST_LINES 4
+#define UI_LINE_CHARS 21
+#define UI_KEY_DEBOUNCE_MS 5
+#define UI_KEY_LONG_MS 350
+#define UI_MENU_REFRESH_MS 200
+#define UI_EDIT_REFRESH_MS 80
+#define UI_STATUS_REFRESH_MS 120
+
+#define MENU_ACTION_STATUS 1
+
 typedef enum { MENU_TYPE_SUBMENU=0, MENU_TYPE_PARAM=1, MENU_TYPE_ACTION=2 } MenuItemType;
 typedef enum { MENU_VALUE_NONE=0, MENU_VALUE_FLOAT=1, MENU_VALUE_INT8=2, MENU_VALUE_INT16=3, MENU_VALUE_INT32=4 } MenuValueType;
+typedef enum { UI_VIEW_MENU=0, UI_VIEW_STATUS=1, UI_VIEW_EDIT=2 } UiView;
+
 typedef struct {
   const char *name;
-  uint8_t type;
+  MenuItemType type;
   int8_t parent;
-  uint8_t child_start;
-  uint8_t child_count;
-  uint8_t value_type;
+  MenuValueType value_type;
   void *value_ptr;
   float step;
   float min;
   float max;
   uint8_t action_id;
 } MenuItem;
-typedef enum { UI_VIEW_MENU=0, UI_VIEW_STATUS=1, UI_VIEW_EDIT=2 } UiView;
+
 typedef struct {
   uint8_t stable;
   uint8_t last_raw;
@@ -192,11 +202,63 @@ typedef struct {
   uint8_t long_sent;
 } KeyState;
 
+typedef struct {
+  uint8_t short_press;
+  uint8_t long_press;
+} KeyEvent;
+
+enum {
+  MENU_IDX_ROOT = 0,
+  MENU_IDX_STATUS,
+  MENU_IDX_MODE,
+  MENU_IDX_PID_M1,
+  MENU_IDX_PID_M2,
+  MENU_IDX_PID_TRACK,
+  MENU_IDX_LINE,
+  MENU_IDX_M1_KP,
+  MENU_IDX_M1_KI,
+  MENU_IDX_M1_KD,
+  MENU_IDX_M2_KP,
+  MENU_IDX_M2_KI,
+  MENU_IDX_M2_KD,
+  MENU_IDX_TR_KP,
+  MENU_IDX_TR_KI,
+  MENU_IDX_TR_KD,
+  MENU_IDX_LINE_BASE,
+  MENU_IDX_LINE_SEARCH,
+  MENU_IDX_LINE_MAX,
+  MENU_IDX_LINE_MIN,
+  MENU_IDX_COUNT
+};
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+static const MenuItem g_menu_items[MENU_IDX_COUNT] = {
+  {"Root", MENU_TYPE_SUBMENU, -1, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
+  {"Status", MENU_TYPE_ACTION, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, MENU_ACTION_STATUS},
+  {"Mode", MENU_TYPE_PARAM, MENU_IDX_ROOT, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
+  {"PID M1", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
+  {"PID M2", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
+  {"PID Track", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
+  {"Line", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
+  {"M1 Kp", MENU_TYPE_PARAM, MENU_IDX_PID_M1, MENU_VALUE_FLOAT, &pidMotor1Speed.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"M1 Ki", MENU_TYPE_PARAM, MENU_IDX_PID_M1, MENU_VALUE_FLOAT, &pidMotor1Speed.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"M1 Kd", MENU_TYPE_PARAM, MENU_IDX_PID_M1, MENU_VALUE_FLOAT, &pidMotor1Speed.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"M2 Kp", MENU_TYPE_PARAM, MENU_IDX_PID_M2, MENU_VALUE_FLOAT, &pidMotor2Speed.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"M2 Ki", MENU_TYPE_PARAM, MENU_IDX_PID_M2, MENU_VALUE_FLOAT, &pidMotor2Speed.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"M2 Kd", MENU_TYPE_PARAM, MENU_IDX_PID_M2, MENU_VALUE_FLOAT, &pidMotor2Speed.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"TR Kp", MENU_TYPE_PARAM, MENU_IDX_PID_TRACK, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kp, 0.1f, -50.0f, 50.0f, 0},
+  {"TR Ki", MENU_TYPE_PARAM, MENU_IDX_PID_TRACK, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.ki, 0.01f, -10.0f, 10.0f, 0},
+  {"TR Kd", MENU_TYPE_PARAM, MENU_IDX_PID_TRACK, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0},
+  {"Base Spd", MENU_TYPE_PARAM, MENU_IDX_LINE, MENU_VALUE_FLOAT, &g_line_base_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Search Spd", MENU_TYPE_PARAM, MENU_IDX_LINE, MENU_VALUE_FLOAT, &g_line_search_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Max Spd", MENU_TYPE_PARAM, MENU_IDX_LINE, MENU_VALUE_FLOAT, &g_line_max_speed, 0.1f, 0.0f, 8.0f, 0},
+  {"Min Spd", MENU_TYPE_PARAM, MENU_IDX_LINE, MENU_VALUE_FLOAT, &g_line_min_speed, 0.1f, 0.0f, 8.0f, 0}
+};
 
+static const uint8_t g_menu_count = (uint8_t)(sizeof(g_menu_items) / sizeof(g_menu_items[0]));
 /* USER CODE END Variables */
 osThreadId defaultTaskHandle;
 osThreadId ControlTaskHandle;
@@ -217,6 +279,17 @@ void StartVisionTask(void const * argument);
 void StartLogicTask(void const * argument);
 void StartTask06(void const * argument);
 
+static int32_t ui_get_int(const MenuItem *item);
+static void ui_set_int(const MenuItem *item, int32_t v);
+static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt);
+static void ui_format_value(const MenuItem *item, char *buf, uint8_t len);
+static uint8_t ui_menu_child_count(int8_t parent);
+static int16_t ui_menu_child_index(int8_t parent, uint8_t child_pos);
+static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index);
+static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index);
+static void ui_draw_line(uint8_t row, const char *text);
+static void ui_draw_status(void);
+
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
@@ -230,26 +303,6 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 /* GetIdleTaskMemory prototype (linked to static allocation support) */
 void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize );
-
-/* USER CODE BEGIN GET_IDLE_TASK_MEMORY */
-static StaticTask_t xIdleTaskTCBBuffer;
-static StackType_t xIdleStack[configMINIMAL_STACK_SIZE];
-
-void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
-                                    StackType_t **ppxIdleTaskStackBuffer,
-                                    uint32_t *pulIdleTaskStackSize )
-{
-  *ppxIdleTaskTCBBuffer = &xIdleTaskTCBBuffer;
-  *ppxIdleTaskStackBuffer = &xIdleStack[0];
-  *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
-}
-/* USER CODE END GET_IDLE_TASK_MEMORY */
-
-/**
-  * @brief  FreeRTOS initialization
-  * @param  None
-  * @retval None
-  */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
@@ -304,6 +357,7 @@ void MX_FREERTOS_Init(void) {
   StartUITaskHandle = osThreadCreate(osThread(StartUITask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  osThreadSetPriority(StartUITaskHandle, osPriorityNormal);
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
 
@@ -344,7 +398,7 @@ void StartControlTask(void const * argument)
 
   static float m1_speed_f = 0.0f;
   static float m2_speed_f = 0.0f;
-  //更精准的�?dt
+  //更精准的�?dt
   // TickType_t now = xTaskGetTickCount();
   // float dt = (now - lastTick) * 0.001f;
   // lastTick = now;
@@ -381,11 +435,11 @@ void StartControlTask(void const * argument)
     Motor1Speed = rev1 / dt;
     Motor2Speed = -rev2 / dt;
 
-    // 一阶低�?
+    // 一阶低�?
     m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
     m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
 
-    // PID 用滤波后�?
+    // PID 用滤波后�?
     Motor_Set(
       PID_realize(&pidMotor1Speed, m1_speed_f, dt),
       PID_realize(&pidMotor2Speed, m2_speed_f, dt)
@@ -474,10 +528,10 @@ void StartVisionTask(void const * argument)
     if (xQueueReceive(VisionQueueHandle, &data, pdMS_TO_TICKS(20)) == pdTRUE)
     {
       // 这里处理 data.x / data.y
-      // 例如更新目标或者保存到全局结构�?
+      // 例如更新目标或者保存到全局结构�?
       // last_vision_tick = xTaskGetTickCount();
     }
-    //osDelay(10);
+    //osDelay(5);
   }
   /* USER CODE END StartVisionTask */
 }
@@ -522,7 +576,7 @@ void StartLogicTask(void const * argument)
 
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
     {
-      // 收到指令，开始干�?
+      // 收到指令，开始干�?
       g_uart_manual_active = 1;
       switch(cmd_char)
         
@@ -636,7 +690,7 @@ void StartLogicTask(void const * argument)
           case AVOID_PAUSE:
             if (now >= avoid_deadline) {
               motorPidSetSpeed(0, 0);
-              avoid_set_state(AVOID_IDLE, 200); // 停一�?
+              avoid_set_state(AVOID_IDLE, 200);
             }
             break;
         }
@@ -684,31 +738,234 @@ void StartLogicTask(void const * argument)
   /* USER CODE END StartLogicTask */
 }
 
-static MenuItem g_menu_items[] = {
-  {"Root", MENU_TYPE_SUBMENU, -1, 1, 6, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"Status", MENU_TYPE_ACTION, 0, 0, 0, MENU_VALUE_NONE, 0, 0, 0, 0, 1},
-  {"Mode", MENU_TYPE_PARAM, 0, 0, 0, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
-  {"PID M1", MENU_TYPE_SUBMENU, 0, 7, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID M2", MENU_TYPE_SUBMENU, 0, 10, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"PID Track", MENU_TYPE_SUBMENU, 0, 13, 3, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"Line", MENU_TYPE_SUBMENU, 0, 16, 4, MENU_VALUE_NONE, 0, 0, 0, 0, 0},
-  {"M1 Kp", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"M1 Ki", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"M1 Kd", MENU_TYPE_PARAM, 3, 0, 0, MENU_VALUE_FLOAT, &pidMotor1Speed.kd, 0.1f, -50.0f, 50.0f, 0},
-  {"M2 Kp", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"M2 Ki", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"M2 Kd", MENU_TYPE_PARAM, 4, 0, 0, MENU_VALUE_FLOAT, &pidMotor2Speed.kd, 0.1f, -50.0f, 50.0f, 0},
-  {"TR Kp", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kp, 0.1f, -50.0f, 50.0f, 0},
-  {"TR Ki", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.ki, 0.01f, -10.0f, 10.0f, 0},
-  {"TR Kd", MENU_TYPE_PARAM, 5, 0, 0, MENU_VALUE_FLOAT, &pid_pidHW_Tracking.kd, 0.1f, -50.0f, 50.0f, 0},
-  {"Base Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_base_speed, 0.1f, 0.0f, 8.0f, 0},
-  {"Search Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_search_speed, 0.1f, 0.0f, 8.0f, 0},
-  {"Max Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_max_speed, 0.1f, 0.0f, 8.0f, 0},
-  {"Min Spd", MENU_TYPE_PARAM, 6, 0, 0, MENU_VALUE_FLOAT, &g_line_min_speed, 0.1f, 0.0f, 8.0f, 0}
-};
+/* USER CODE BEGIN Header_StartTask06 */
+/**
+* @brief Function implementing the StartUITask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask06 */
+void StartTask06(void const * argument)
+{
+    /* USER CODE BEGIN StartTask06 */
+  OLED_Init();
+  OLED_Clear();
+
+  // KEY1: Up/Enter, KEY2: Down/Back (short/long press).
+  KeyState key_up = {0};
+  KeyState key_down = {0};
+  UiView view = UI_VIEW_MENU;
+  int8_t current_parent = MENU_IDX_ROOT;
+  uint8_t cursor = 0;
+  uint8_t view_offset = 0;
+  uint8_t edit_index = 0;
+  float edit_backup_f = 0.0f;
+  int32_t edit_backup_i = 0;
+  uint32_t last_draw = 0;
+  uint8_t redraw_pending = 1;
+
+  for(;;)
+  {
+    uint32_t now = HAL_GetTick();
+    KeyEvent up_evt = {0};
+    KeyEvent down_evt = {0};
+    uint8_t need_redraw = 0;
+
+    uint8_t raw_up = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
+    uint8_t raw_down = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
+    ui_key_update(&key_up, raw_up, now, &up_evt);
+    ui_key_update(&key_down, raw_down, now, &down_evt);
+
+    if (view == UI_VIEW_MENU)
+    {
+      uint8_t count = ui_menu_child_count(current_parent);
+      if (count == 0)
+      {
+        cursor = 0;
+        view_offset = 0;
+        if (down_evt.long_press && current_parent != MENU_IDX_ROOT)
+        {
+          uint8_t child = (uint8_t)current_parent;
+          current_parent = g_menu_items[current_parent].parent;
+          cursor = ui_menu_child_pos(current_parent, child);
+          view_offset = 0;
+          if (cursor >= UI_LIST_LINES) view_offset = cursor - (UI_LIST_LINES - 1);
+          need_redraw = 1;
+        }
+      }
+      else
+      {
+        if (cursor >= count) cursor = (uint8_t)(count - 1);
+
+        if (up_evt.short_press)
+        {
+          cursor = (cursor == 0) ? (uint8_t)(count - 1) : (uint8_t)(cursor - 1);
+          need_redraw = 1;
+        }
+        if (down_evt.short_press)
+        {
+          cursor++;
+          if (cursor >= count) cursor = 0;
+          need_redraw = 1;
+        }
+
+        if (cursor < view_offset) view_offset = cursor;
+        if (cursor >= view_offset + UI_LIST_LINES) view_offset = cursor - (UI_LIST_LINES - 1);
+
+        if (up_evt.long_press)
+        {
+          int16_t idx = ui_menu_child_index(current_parent, cursor);
+          if (idx >= 0)
+          {
+            const MenuItem *item = &g_menu_items[idx];
+            if (item->type == MENU_TYPE_SUBMENU)
+            {
+              current_parent = (int8_t)idx;
+              cursor = 0;
+              view_offset = 0;
+              need_redraw = 1;
+            }
+            else if (item->type == MENU_TYPE_PARAM)
+            {
+              view = UI_VIEW_EDIT;
+              redraw_pending = 1;
+              edit_index = (uint8_t)idx;
+              if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
+              {
+                edit_backup_f = *(float *)item->value_ptr;
+              }
+              else
+              {
+                edit_backup_i = ui_get_int(item);
+              }
+              last_draw = 0;
+            }
+            else if (item->type == MENU_TYPE_ACTION)
+            {
+              if (item->action_id == MENU_ACTION_STATUS) view = UI_VIEW_STATUS;
+              redraw_pending = 1;
+              last_draw = 0;
+            }
+          }
+        }
+
+        if (down_evt.long_press)
+        {
+          if (current_parent != MENU_IDX_ROOT)
+          {
+            uint8_t child = (uint8_t)current_parent;
+            current_parent = g_menu_items[current_parent].parent;
+            cursor = ui_menu_child_pos(current_parent, child);
+            view_offset = 0;
+            if (cursor >= UI_LIST_LINES) view_offset = cursor - (UI_LIST_LINES - 1);
+            need_redraw = 1;
+          }
+        }
+      }
+
+      if (view == UI_VIEW_MENU && (need_redraw || redraw_pending))
+      {
+        ui_draw_menu(current_parent, cursor, view_offset, 0, edit_index);
+        last_draw = now;
+        redraw_pending = 0;
+      }
+    }
+    else if (view == UI_VIEW_EDIT)
+    {
+      const MenuItem *item = &g_menu_items[edit_index];
+      if (up_evt.short_press || down_evt.short_press)
+      {
+        if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
+        {
+          float v = *(float *)item->value_ptr;
+          float step = item->step;
+          if (step == 0.0f) step = 0.1f;
+          if (up_evt.short_press) v += step;
+          if (down_evt.short_press) v -= step;
+          if (v > item->max) v = item->max;
+          if (v < item->min) v = item->min;
+          *(float *)item->value_ptr = v;
+        }
+        else
+        {
+          int32_t v = ui_get_int(item);
+          int32_t step = (int32_t)item->step;
+          if (step <= 0) step = 1;
+          if (up_evt.short_press) v += step;
+          if (down_evt.short_press) v -= step;
+          if (v > (int32_t)item->max) v = (int32_t)item->max;
+          if (v < (int32_t)item->min) v = (int32_t)item->min;
+          ui_set_int(item, v);
+        }
+        need_redraw = 1;
+      }
+
+      if (up_evt.long_press)
+      {
+        view = UI_VIEW_MENU;
+        redraw_pending = 1;
+        last_draw = 0;
+      }
+      if (down_evt.long_press)
+      {
+        if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
+        {
+          *(float *)item->value_ptr = edit_backup_f;
+        }
+        else
+        {
+          ui_set_int(item, edit_backup_i);
+        }
+        view = UI_VIEW_MENU;
+        redraw_pending = 1;
+        last_draw = 0;
+      }
+
+      if (view == UI_VIEW_EDIT && (need_redraw || redraw_pending))
+      {
+        ui_draw_menu(current_parent, cursor, view_offset, 1, edit_index);
+        last_draw = now;
+        redraw_pending = 0;
+      }
+    }
+    else if (view == UI_VIEW_STATUS)
+    {
+      if (up_evt.long_press || down_evt.long_press)
+      {
+        view = UI_VIEW_MENU;
+        redraw_pending = 1;
+        last_draw = 0;
+      }
+      if (view == UI_VIEW_STATUS && (need_redraw || redraw_pending || (now - last_draw) > UI_STATUS_REFRESH_MS))
+      {
+        ui_draw_status();
+        last_draw = now;
+        redraw_pending = 0;
+      }
+    }
+
+    osDelay(5);
+  }
+  /* USER CODE END StartTask06 */
+}
+
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
+static StaticTask_t xIdleTaskTCBBuffer;
+static StackType_t xIdleStack[configMINIMAL_STACK_SIZE];
+
+void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
+                                    StackType_t **ppxIdleTaskStackBuffer,
+                                    uint32_t *pulIdleTaskStackSize )
+{
+  *ppxIdleTaskTCBBuffer = &xIdleTaskTCBBuffer;
+  *ppxIdleTaskStackBuffer = &xIdleStack[0];
+  *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+}
 
 static int32_t ui_get_int(const MenuItem *item)
 {
+  if (item == 0 || item->value_ptr == 0) return 0;
   if (item->value_type == MENU_VALUE_INT8) return *(int8_t *)item->value_ptr;
   if (item->value_type == MENU_VALUE_INT16) return *(int16_t *)item->value_ptr;
   if (item->value_type == MENU_VALUE_INT32) return *(int32_t *)item->value_ptr;
@@ -717,19 +974,23 @@ static int32_t ui_get_int(const MenuItem *item)
 
 static void ui_set_int(const MenuItem *item, int32_t v)
 {
+  if (item == 0 || item->value_ptr == 0) return;
   if (item->value_type == MENU_VALUE_INT8) *(int8_t *)item->value_ptr = (int8_t)v;
   else if (item->value_type == MENU_VALUE_INT16) *(int16_t *)item->value_ptr = (int16_t)v;
   else if (item->value_type == MENU_VALUE_INT32) *(int32_t *)item->value_ptr = (int32_t)v;
 }
 
-static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debounce_ms, uint32_t long_ms, uint8_t *short_evt, uint8_t *long_evt)
+static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
 {
+  evt->short_press = 0;
+  evt->long_press = 0;
+
   if (raw != k->last_raw)
   {
     k->last_raw = raw;
     k->last_change = now;
   }
-  else if ((now - k->last_change) >= debounce_ms && raw != k->stable)
+  else if ((now - k->last_change) >= UI_KEY_DEBOUNCE_MS && raw != k->stable)
   {
     k->stable = raw;
     if (k->stable)
@@ -739,20 +1000,20 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, uint32_t debou
     }
     else
     {
-      if (!k->long_sent) *short_evt = 1;
+      if (!k->long_sent) evt->short_press = 1;
     }
   }
 
-  if (k->stable && !k->long_sent && (now - k->press_tick) >= long_ms)
+  if (k->stable && !k->long_sent && (now - k->press_tick) >= UI_KEY_LONG_MS)
   {
-    *long_evt = 1;
+    evt->long_press = 1;
     k->long_sent = 1;
   }
 }
 
 static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
 {
-  if (item->value_type == MENU_VALUE_FLOAT)
+  if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
   {
     snprintf(buf, len, "%.2f", *(float *)item->value_ptr);
   }
@@ -766,229 +1027,122 @@ static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
   }
 }
 
-static uint8_t ui_find_child_cursor(uint8_t parent, uint8_t child_index)
+static uint8_t ui_menu_child_count(int8_t parent)
 {
-  uint8_t start = g_menu_items[parent].child_start;
-  uint8_t count = g_menu_items[parent].child_count;
+  uint8_t count = 0;
   uint8_t i;
-  for (i = 0; i < count; i++)
+  for (i = 0; i < g_menu_count; i++)
   {
-    if (start + i == child_index) return i;
+    if (g_menu_items[i].parent == parent) count++;
+  }
+  return count;
+}
+
+static int16_t ui_menu_child_index(int8_t parent, uint8_t child_pos)
+{
+  uint8_t count = 0;
+  uint8_t i;
+  for (i = 0; i < g_menu_count; i++)
+  {
+    if (g_menu_items[i].parent != parent) continue;
+    if (count == child_pos) return (int16_t)i;
+    count++;
+  }
+  return -1;
+}
+
+static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index)
+{
+  uint8_t count = 0;
+  uint8_t i;
+  for (i = 0; i < g_menu_count; i++)
+  {
+    if (g_menu_items[i].parent != parent) continue;
+    if (i == child_index) return count;
+    count++;
   }
   return 0;
 }
 
-static void ui_draw_menu(uint8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index)
+static void ui_draw_line(uint8_t row, const char *text)
 {
-  uint8_t start = g_menu_items[parent].child_start;
-  uint8_t count = g_menu_items[parent].child_count;
-  uint8_t line;
-  OLED_Clear();
-  for (line = 0; line < 4; line++)
+  char buf[UI_LINE_CHARS + 1];
+  uint8_t i = 0;
+
+  if (text != 0)
   {
-    uint8_t idx = start + view_offset + line;
-    if (idx >= start + count) break;
-    MenuItem *item = &g_menu_items[idx];
+    for (; i < UI_LINE_CHARS && text[i] != '\0'; i++) buf[i] = text[i];
+  }
+  for (; i < UI_LINE_CHARS; i++) buf[i] = ' ';
+  buf[UI_LINE_CHARS] = '\0';
+
+  OLED_ShowString(0, row, (uint8_t *)buf, 12);
+}
+
+static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index)
+{
+  uint8_t count = ui_menu_child_count(parent);
+  uint8_t line;
+  int16_t cursor_idx = ui_menu_child_index(parent, cursor);
+
+  if (count == 0)
+  {
+    ui_draw_line(0, ">Empty");
+    ui_draw_line(1, "");
+    ui_draw_line(2, "");
+    ui_draw_line(3, "");
+    return;
+  }
+
+  for (line = 0; line < UI_LIST_LINES; line++)
+  {
+    uint8_t pos = (uint8_t)(view_offset + line);
+    int16_t idx;
+    const MenuItem *item;
     char linebuf[24];
     char valbuf[12];
     char mark = ' ';
-    if (idx == start + cursor) mark = '>';
+
+    if (pos >= count) break;
+    idx = ui_menu_child_index(parent, pos);
+    if (idx < 0) break;
+
+    item = &g_menu_items[idx];
+    if (idx == cursor_idx) mark = '>';
     if (edit_mode && idx == edit_index) mark = '*';
+
     if (item->type == MENU_TYPE_PARAM)
     {
       ui_format_value(item, valbuf, sizeof(valbuf));
       snprintf(linebuf, sizeof(linebuf), "%c%s:%s", mark, item->name, valbuf);
     }
+    else if (item->type == MENU_TYPE_SUBMENU)
+    {
+      snprintf(linebuf, sizeof(linebuf), "%c%s>", mark, item->name);
+    }
     else
     {
       snprintf(linebuf, sizeof(linebuf), "%c%s", mark, item->name);
     }
-    OLED_ShowString(0, line, (uint8_t *)linebuf, 12);
+
+    ui_draw_line(line, linebuf);
   }
+
+  for (; line < UI_LIST_LINES; line++) ui_draw_line(line, "");
 }
 
 static void ui_draw_status(void)
 {
   char line[32];
-  OLED_Clear();
   snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
-  OLED_ShowString(0, 0, (uint8_t *)line, 12);
+  ui_draw_line(0, line);
   snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
-  OLED_ShowString(0, 1, (uint8_t *)line, 12);
+  ui_draw_line(1, line);
   snprintf(line, sizeof(line), "D:%.1f M:%.1f", dist, mile);
-  OLED_ShowString(0, 2, (uint8_t *)line, 12);
+  ui_draw_line(2, line);
   snprintf(line, sizeof(line), "Yaw:%.1f", yaw);
-  OLED_ShowString(0, 3, (uint8_t *)line, 12);
+  ui_draw_line(3, line);
 }
-/* USER CODE BEGIN Header_StartTask06 */
-/**
-* @brief Function implementing the StartUITask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask06 */
-void StartTask06(void const * argument)
-{
-  /* USER CODE BEGIN StartTask06 */
-  OLED_Init();
-  OLED_Clear();
-
-  KeyState key1 = {0};
-  KeyState key2 = {0};
-  UiView view = UI_VIEW_MENU;
-  uint8_t current_parent = 0;
-  uint8_t cursor = 0;
-  uint8_t view_offset = 0;
-  uint8_t edit_index = 0;
-  float edit_backup_f = 0.0f;
-  int32_t edit_backup_i = 0;
-  uint32_t last_draw = 0;
-
-  for(;;)
-  {
-    uint32_t now = HAL_GetTick();
-    uint8_t key1_short = 0;
-    uint8_t key1_long = 0;
-    uint8_t key2_short = 0;
-    uint8_t key2_long = 0;
-    uint8_t need_redraw = 0;
-
-    uint8_t raw1 = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
-    uint8_t raw2 = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
-    ui_key_update(&key1, raw1, now, 10, 600, &key1_short, &key1_long);
-    ui_key_update(&key2, raw2, now, 10, 600, &key2_short, &key2_long);
-
-    if (view == UI_VIEW_MENU)
-    {
-      uint8_t count = g_menu_items[current_parent].child_count;
-      uint8_t start = g_menu_items[current_parent].child_start;
-      if (key1_short)
-      {
-        if (cursor == 0) cursor = count - 1; else cursor--;
-        need_redraw = 1;
-      }
-      if (key2_short)
-      {
-        cursor++;
-        if (cursor >= count) cursor = 0;
-        need_redraw = 1;
-      }
-      if (cursor < view_offset) view_offset = cursor;
-      if (cursor >= view_offset + 4) view_offset = cursor - 3;
-
-      if (key1_long)
-      {
-        uint8_t idx = start + cursor;
-        MenuItem *item = &g_menu_items[idx];
-        if (item->type == MENU_TYPE_SUBMENU)
-        {
-          current_parent = idx;
-          cursor = 0;
-          view_offset = 0;
-          need_redraw = 1;
-        }
-        else if (item->type == MENU_TYPE_PARAM)
-        {
-          view = UI_VIEW_EDIT;
-          edit_index = idx;
-          if (item->value_type == MENU_VALUE_FLOAT) edit_backup_f = *(float *)item->value_ptr;
-          else edit_backup_i = ui_get_int(item);
-          need_redraw = 1;
-        }
-        else if (item->type == MENU_TYPE_ACTION)
-        {
-          if (item->action_id == 1) view = UI_VIEW_STATUS;
-          need_redraw = 1;
-        }
-      }
-
-      if (key2_long)
-      {
-        if (current_parent != 0)
-        {
-          uint8_t parent = g_menu_items[current_parent].parent;
-          cursor = ui_find_child_cursor(parent, current_parent);
-          current_parent = parent;
-          view_offset = 0;
-          if (cursor >= 4) view_offset = cursor - 3;
-          need_redraw = 1;
-        }
-      }
-
-      if (need_redraw || (now - last_draw) > 500)
-      {
-        ui_draw_menu(current_parent, cursor, view_offset, 0, edit_index);
-        last_draw = now;
-      }
-    }
-    else if (view == UI_VIEW_EDIT)
-    {
-      MenuItem *item = &g_menu_items[edit_index];
-      if (key1_short || key2_short)
-      {
-        if (item->value_type == MENU_VALUE_FLOAT)
-        {
-          float v = *(float *)item->value_ptr;
-          float step = item->step;
-          if (key1_short) v += step;
-          if (key2_short) v -= step;
-          if (v > item->max) v = item->max;
-          if (v < item->min) v = item->min;
-          *(float *)item->value_ptr = v;
-        }
-        else
-        {
-          int32_t v = ui_get_int(item);
-          int32_t step = (int32_t)item->step;
-          if (step <= 0) step = 1;
-          if (key1_short) v += step;
-          if (key2_short) v -= step;
-          if (v > (int32_t)item->max) v = (int32_t)item->max;
-          if (v < (int32_t)item->min) v = (int32_t)item->min;
-          ui_set_int(item, v);
-        }
-        need_redraw = 1;
-      }
-      if (key1_long)
-      {
-        view = UI_VIEW_MENU;
-        need_redraw = 1;
-      }
-      if (key2_long)
-      {
-        if (item->value_type == MENU_VALUE_FLOAT) *(float *)item->value_ptr = edit_backup_f;
-        else ui_set_int(item, edit_backup_i);
-        view = UI_VIEW_MENU;
-        need_redraw = 1;
-      }
-
-      if (need_redraw || (now - last_draw) > 300)
-      {
-        ui_draw_menu(current_parent, cursor, view_offset, 1, edit_index);
-        last_draw = now;
-      }
-    }
-    else if (view == UI_VIEW_STATUS)
-    {
-      if (key2_long || key1_long)
-      {
-        view = UI_VIEW_MENU;
-        need_redraw = 1;
-      }
-      if (need_redraw || (now - last_draw) > 300)
-      {
-        ui_draw_status();
-        last_draw = now;
-      }
-    }
-
-    osDelay(10);
-  }
-  /* USER CODE END StartTask06 */
-}
-
-/* Private application code --------------------------------------------------*/
-/* USER CODE BEGIN Application */
 
 void vApplicationMallocFailedHook(void)
 {
@@ -1011,4 +1165,18 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 }
 
 /* USER CODE END Application */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
