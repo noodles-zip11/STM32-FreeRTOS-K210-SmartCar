@@ -35,6 +35,7 @@
  #include "inv_mpu.h"
 #include "tim.h"
 #include "gpio.h"
+#include "usart.h"
 // #include "adc.h"
 #include "iwdg.h"
 #include "queue.h"
@@ -102,6 +103,8 @@ float pitch,roll,yaw;
 
 //单字节接收缓冲区（视觉）
 uint8_t  RxBuffer;
+//vofa
+//static TickType_t g_vofa_tx_tick = 0;
 
 //数据快照结构体
 typedef struct {
@@ -288,6 +291,8 @@ static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index);
 static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index);
 static void ui_draw_line(uint8_t row, const char *text);
 static void ui_draw_status(void);
+//vofa
+//static void vofa_send_waveform(float target_speed, float actual_speed);
 
 /* USER CODE END FunctionPrototypes */
 // void StartDefaultTask(void const * argument);
@@ -449,6 +454,15 @@ void StartControlTask(void const * argument)
       PID_realize(&pidMotor1Speed, m1_speed_f, dt),
       PID_realize(&pidMotor2Speed, m2_speed_f, dt)
     );
+
+    //vofa
+    // if ((now - g_vofa_tx_tick) >= pdMS_TO_TICKS(50))
+    // {
+    //   float target_speed = 0.5f * (pidMotor1Speed.target_val + pidMotor2Speed.target_val);
+    //   float actual_speed = 0.5f * (m1_speed_f + m2_speed_f);
+    //   vofa_send_waveform(target_speed, actual_speed);
+    //   g_vofa_tx_tick = now;
+    // }
 
     HAL_IWDG_Refresh(&hiwdg);  // 周期性刷新 IWDG，避免任务阻塞导致系统复位
 
@@ -976,6 +990,19 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
   *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
 }
 
+//vofa
+// static void vofa_send_waveform(float target_speed, float actual_speed)
+// {
+//   char tx[64];
+//   long target_milli = (long)(target_speed * 1000.0f);
+//   long actual_milli = (long)(actual_speed * 1000.0f);
+//   int n = snprintf(tx, sizeof(tx), "speed:%ld,%ld\r\n", target_milli, actual_milli);
+//   if (n > 0)
+//   {
+//     size_t len = strlen(tx);
+//     HAL_UART_Transmit(&huart1, (uint8_t *)tx, (uint16_t)len, 5);
+//   }
+// }
 //万能数据读写助手，UI 逻辑都统一按 32 位处理
 static int32_t ui_get_int(const MenuItem *item)
 {
