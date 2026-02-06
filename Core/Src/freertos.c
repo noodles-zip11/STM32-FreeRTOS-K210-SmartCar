@@ -755,27 +755,33 @@ void StartTask06(void const * argument)
     /* USER CODE BEGIN StartTask06 */
   OLED_Init();
   OLED_Clear();
-
   // KEY1: Up/Enter, KEY2: Down/Back (short/long press).
+  //按键状态
   KeyState key_up = {0};
   KeyState key_down = {0};
+  //菜单状态
   UiView view = UI_VIEW_MENU;
   int8_t current_parent = MENU_IDX_ROOT;
   uint8_t cursor = 0;
   uint8_t view_offset = 0;
+  //储存旧值，退回上一值
   uint8_t edit_index = 0;
   float edit_backup_f = 0.0f;
   int32_t edit_backup_i = 0;
+  //启动信号
   uint32_t last_draw = 0;
   uint8_t redraw_pending = 1;
 
   for(;;)
   {
+    //获取时间
     uint32_t now = HAL_GetTick();
+    //储存长按还是短按
     KeyEvent up_evt = {0};
     KeyEvent down_evt = {0};
     uint8_t need_redraw = 0;
 
+    //查看高低电平
     uint8_t raw_up = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
     uint8_t raw_down = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
     ui_key_update(&key_up, raw_up, now, &up_evt);
@@ -798,6 +804,7 @@ void StartTask06(void const * argument)
           need_redraw = 1;
         }
       }
+      //正常短按
       else
       {
         if (cursor >= count) cursor = (uint8_t)(count - 1);
@@ -813,7 +820,7 @@ void StartTask06(void const * argument)
           if (cursor >= count) cursor = 0;
           need_redraw = 1;
         }
-
+      //翻页
         if (cursor < view_offset) view_offset = cursor;
         if (cursor >= view_offset + UI_LIST_LINES) view_offset = cursor - (UI_LIST_LINES - 1);
 
@@ -875,6 +882,7 @@ void StartTask06(void const * argument)
         redraw_pending = 0;
       }
     }
+    //改数据
     else if (view == UI_VIEW_EDIT)
     {
       const MenuItem *item = &g_menu_items[edit_index];
@@ -968,6 +976,7 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
   *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
 }
 
+//万能数据读写助手，UI 逻辑都统一按 32 位处理
 static int32_t ui_get_int(const MenuItem *item)
 {
   if (item == 0 || item->value_ptr == 0) return 0;
@@ -976,7 +985,6 @@ static int32_t ui_get_int(const MenuItem *item)
   if (item->value_type == MENU_VALUE_INT32) return *(int32_t *)item->value_ptr;
   return 0;
 }
-
 static void ui_set_int(const MenuItem *item, int32_t v)
 {
   if (item == 0 || item->value_ptr == 0) return;
@@ -985,6 +993,7 @@ static void ui_set_int(const MenuItem *item, int32_t v)
   else if (item->value_type == MENU_VALUE_INT32) *(int32_t *)item->value_ptr = (int32_t)v;
 }
 
+//将历史的放在k里，更新evt
 static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
 {
   evt->short_press = 0;
@@ -1016,6 +1025,7 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
   }
 }
 
+
 static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
 {
   if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
@@ -1032,6 +1042,7 @@ static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
   }
 }
 
+//菜单层级搜索算法
 static uint8_t ui_menu_child_count(int8_t parent)
 {
   uint8_t count = 0;
@@ -1042,7 +1053,6 @@ static uint8_t ui_menu_child_count(int8_t parent)
   }
   return count;
 }
-
 static int16_t ui_menu_child_index(int8_t parent, uint8_t child_pos)
 {
   uint8_t count = 0;
@@ -1055,7 +1065,6 @@ static int16_t ui_menu_child_index(int8_t parent, uint8_t child_pos)
   }
   return -1;
 }
-
 static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index)
 {
   uint8_t count = 0;
@@ -1069,6 +1078,7 @@ static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index)
   return 0;
 }
 
+//绘图引擎
 static void ui_draw_line(uint8_t row, const char *text)
 {
   char buf[UI_LINE_CHARS + 1];
@@ -1083,7 +1093,6 @@ static void ui_draw_line(uint8_t row, const char *text)
 
   OLED_ShowString(0, row, (uint8_t *)buf, 12);
 }
-
 static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index)
 {
   uint8_t count = ui_menu_child_count(parent);
@@ -1098,7 +1107,6 @@ static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uin
     ui_draw_line(3, "");
     return;
   }
-
   for (line = 0; line < UI_LIST_LINES; line++)
   {
     uint8_t pos = (uint8_t)(view_offset + line);
@@ -1135,7 +1143,6 @@ static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uin
 
   for (; line < UI_LIST_LINES; line++) ui_draw_line(line, "");
 }
-
 static void ui_draw_status(void)
 {
   char line[32];
@@ -1148,6 +1155,8 @@ static void ui_draw_status(void)
   snprintf(line, sizeof(line), "Yaw:%.1f", yaw);
   ui_draw_line(3, line);
 }
+
+
 
 void vApplicationMallocFailedHook(void)
 {
