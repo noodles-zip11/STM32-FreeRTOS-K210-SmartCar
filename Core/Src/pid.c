@@ -21,8 +21,8 @@ void PID_init(void)
     pidMotor1Speed.err_last=0.0;
     pidMotor1Speed.err_sum=0.0;
     pidMotor1Speed.kd=0.0;
-    pidMotor1Speed.ki=0.1;
-    pidMotor1Speed.kp=8.0;
+    pidMotor1Speed.ki=1.5;
+    pidMotor1Speed.kp=16.0;
     pidMotor1Speed.max_output=100.0;
     pidMotor1Speed.max_iout=500.0;
     pidMotor1Speed.d_filter_alpha=0.2;
@@ -35,8 +35,8 @@ void PID_init(void)
     pidMotor2Speed.err_last=0.0;
     pidMotor2Speed.err_sum=0.0;
     pidMotor2Speed.kd=0.0;
-    pidMotor2Speed.ki=0.1;
-    pidMotor2Speed.kp=8.0;
+    pidMotor2Speed.ki=1.5;
+    pidMotor2Speed.kp=16.0;
     pidMotor2Speed.max_output=100.0;
     pidMotor2Speed.max_iout=500.0;
     pidMotor2Speed.d_filter_alpha=0.2;
@@ -77,7 +77,7 @@ void PID_init(void)
     mpu6050Movement.err=0.0;
     mpu6050Movement.err_last=0.0;
     mpu6050Movement.err_sum=0.0;
-    mpu6050Movement.kd=0.1;
+    mpu6050Movement.kd=0.0;
     mpu6050Movement.ki=0.0;
     mpu6050Movement.kp=0.02;
     mpu6050Movement.max_output=100.0;

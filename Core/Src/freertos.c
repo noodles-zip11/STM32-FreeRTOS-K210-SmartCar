@@ -30,7 +30,8 @@
 #include "motor.h"
 #include "pid.h"
 #include "string.h"
-#include "HC_SR04.h"
+#include "math.h"
+//#include "HC_SR04.h"
 // #include "mpu6050.h"
  #include "inv_mpu.h"
 #include "tim.h"
@@ -104,7 +105,7 @@ float pitch,roll,yaw;
 //单字节接收缓冲区（视觉）
 uint8_t  RxBuffer;
 //vofa
-//static TickType_t g_vofa_tx_tick = 0;
+static TickType_t g_vofa_tx_tick = 0;
 
 //数据快照结构体
 typedef struct {
@@ -236,7 +237,7 @@ enum {
 static const MenuItem g_menu_items[MENU_IDX_COUNT] = {
   {"Root", MENU_TYPE_SUBMENU, -1, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
   {"Status", MENU_TYPE_ACTION, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, MENU_ACTION_STATUS},
-  {"Mode", MENU_TYPE_PARAM, MENU_IDX_ROOT, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 5.0f, 0},
+  {"Mode", MENU_TYPE_PARAM, MENU_IDX_ROOT, MENU_VALUE_INT8, &g_ucMode, 1.0f, 0.0f, 4.0f, 0},
   {"PID M1", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
   {"PID M2", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
   {"PID Track", MENU_TYPE_SUBMENU, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
@@ -292,7 +293,7 @@ static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uin
 static void ui_draw_line(uint8_t row, const char *text);
 static void ui_draw_status(void);
 //vofa
-//static void vofa_send_waveform(float target_speed, float actual_speed);
+static void vofa_send_waveform(float target_speed, float actual_speed);
 
 /* USER CODE END FunctionPrototypes */
 // void StartDefaultTask(void const * argument);
@@ -351,7 +352,7 @@ void MX_FREERTOS_Init(void) {
                     xControlTaskStack, &xControlTaskTCB);
   ControlTaskHandle = osThreadCreate(osThread(ControlTask), NULL);
 
-  osThreadStaticDef(SensorTask, StartSensorTask, osPriorityAboveNormal, 0, 128,
+  osThreadStaticDef(SensorTask, StartSensorTask, osPriorityNormal, 0, 128,
                     xSensorTaskStack, &xSensorTaskTCB);
   SensorTaskHandle = osThreadCreate(osThread(SensorTask), NULL);
 
@@ -410,6 +411,8 @@ void StartControlTask(void const * argument)
 
   static float m1_speed_f = 0.0f; // 电机1速度低通滤波后的值
   static float m2_speed_f = 0.0f; // 电机2速度低通滤波后的值
+  static float last_target_m1 = 0.0f;
+  static float last_target_m2 = 0.0f;
 
 
 
@@ -419,11 +422,28 @@ void StartControlTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    //有队列有值就传递target
+    //有队列有值就传递target，反向清数据
     if (xQueueReceive(MotorTargetQueueHandle, &target, 0) == pdTRUE)
     {
-      pidMotor1Speed.target_val = target.left;
-      pidMotor2Speed.target_val = target.right;
+      float new_target_m1 = target.left;
+      float new_target_m2 = target.right;
+
+      if ((last_target_m1 > 0.0f && new_target_m1 < 0.0f) ||
+          (last_target_m1 < 0.0f && new_target_m1 > 0.0f))
+      {
+        PID_Reset(&pidMotor1Speed);
+      }
+
+      if ((last_target_m2 > 0.0f && new_target_m2 < 0.0f) ||
+          (last_target_m2 < 0.0f && new_target_m2 > 0.0f))
+      {
+        PID_Reset(&pidMotor2Speed);
+      }
+
+      pidMotor1Speed.target_val = new_target_m1;
+      pidMotor2Speed.target_val = new_target_m2;
+      last_target_m1 = new_target_m1;
+      last_target_m2 = new_target_m2;
     }
 
     //精准计算控制周期
@@ -494,9 +514,9 @@ void StartSensorTask(void const * argument)
     snap.hw[2] = READ_HW_OUT_3;
     snap.hw[3] = READ_HW_OUT_4;
 
-    //读距离
-    snap.dist = Get_Distance_Filtered();
-    snap.sr04 = HC_SR04_Read();
+    //读距离（统一一条超声数据链，避免同周期重复触发）
+    snap.sr04 = Get_Distance_Filtered();
+    snap.dist = snap.sr04;
 
     //读取失败，就回退到上一次的有效值
     if (mpu_dmp_get_data(&snap.pitch, &snap.roll, &snap.yaw) != 0)
@@ -511,7 +531,16 @@ void StartSensorTask(void const * argument)
     //关中断打包数据
     taskENTER_CRITICAL();
     g_sensor_snapshot.seq++;
-    g_sensor_snapshot = snap;
+    if ((g_sensor_snapshot.seq & 1U) == 0U) g_sensor_snapshot.seq++;
+    g_sensor_snapshot.hw[0] = snap.hw[0];
+    g_sensor_snapshot.hw[1] = snap.hw[1];
+    g_sensor_snapshot.hw[2] = snap.hw[2];
+    g_sensor_snapshot.hw[3] = snap.hw[3];
+    g_sensor_snapshot.dist = snap.dist;
+    g_sensor_snapshot.sr04 = snap.sr04;
+    g_sensor_snapshot.pitch = snap.pitch;
+    g_sensor_snapshot.roll = snap.roll;
+    g_sensor_snapshot.yaw = snap.yaw;
     g_sensor_snapshot.seq++;
     g_read[0] = snap.hw[0];
     g_read[1] = snap.hw[1];
@@ -566,6 +595,7 @@ void StartVisionTask(void const * argument)
 void StartLogicTask(void const * argument)
 {
   /* USER CODE BEGIN StartLogicTask */
+  uint8_t last_mode = g_ucMode;
   uint8_t cmd_char;// 串口/队列收到的指令字符
   SensorSnapshot snap; // 本周期使用的传感器快照
   TickType_t lastWakeTime = xTaskGetTickCount();// vTaskDelayUntil 的参考时间
@@ -607,7 +637,7 @@ void StartLogicTask(void const * argument)
         case 'G': motorSpeedCut(); break;
         case 'J':
           g_ucMode++;
-          if(g_ucMode > 5) g_ucMode = 1;
+          if(g_ucMode > 4) g_ucMode = 1;
           g_uart_manual_active = 0;
           break;
         case 'K':
@@ -621,12 +651,35 @@ void StartLogicTask(void const * argument)
           mpu6050Movement.target_val -= 90;
       }
     }
+ //切换模式清数据
+    if (g_ucMode != last_mode)
+    {
+      PID_Reset(&pidMotor1Speed);
+      PID_Reset(&pidMotor2Speed);
+      PID_Reset(&pid_pidHW_Tracking);
+      PID_Reset(&pidFollow);
+      PID_Reset(&mpu6050Movement);
+      g_pid_out = 0.0f;
+      g_pid_out1 = 0.0f;
+      g_pid_out2 = 0.0f;
+      g_follow_pid_out = 0.0f;
+      g_fMPU6050YawMovePidOut = 0.0f;
+      g_fMPU6050YawMovePidOut1 = 0.0f;
+      g_fMPU6050YawMovePidOut2 = 0.0f;
+      avoid_state = AVOID_IDLE;
+      if (g_ucMode == 4)
+      {
+        mpu6050Movement.target_val = snap.yaw;
+      }
+      last_mode = g_ucMode;
+    }
 
     //按键超时
-    if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(1000)) {
-      motorPidSetSpeed(0, 0);
-      g_uart_manual_active = 0;
-    }
+    // if (g_uart_manual_active && (now - g_last_cmd_tick) > pdMS_TO_TICKS(1000))
+    // {
+    //   motorPidSetSpeed(0, 0);
+    //   g_uart_manual_active = 0;
+    // }
 
     //各模块功能
     switch (g_ucMode) {
@@ -635,6 +688,7 @@ void StartLogicTask(void const * argument)
           motorPidSetSpeed(0,0);
         }
         break;
+
       //循迹（未完成）
       case 1:
       {
@@ -716,9 +770,9 @@ void StartLogicTask(void const * argument)
 
     //跟随
       case 3:
-        if(snap.sr04 < 60 )
+        if ((snap.sr04 > 0.0f) && (snap.sr04 < 60.0f))
         {
-          g_follow_pid_out = PI_realize(&pidFollow, snap.sr04);
+          g_follow_pid_out = PID_realize(&pidFollow, snap.sr04, dt);
 
 
           if (g_follow_pid_out > 5) {
@@ -736,7 +790,22 @@ void StartLogicTask(void const * argument)
 
     //走直线
       case 4:
-        g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, snap.yaw,dt);
+      {
+        float yaw_err = mpu6050Movement.target_val - snap.yaw;
+        while (yaw_err > 180.0f) yaw_err -= 360.0f;
+        while (yaw_err < -180.0f) yaw_err += 360.0f;
+
+        if (fabsf(yaw_err) < 1.5f)
+        {
+          g_fMPU6050YawMovePidOut = 0.0f;
+        }
+        else
+        {
+          g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, snap.yaw,dt);
+        }
+
+        if (g_fMPU6050YawMovePidOut > 0.6f) g_fMPU6050YawMovePidOut = 0.6f;
+        if (g_fMPU6050YawMovePidOut < -0.6f) g_fMPU6050YawMovePidOut = -0.6f;
 
         g_fMPU6050YawMovePidOut1 = 1.5 + g_fMPU6050YawMovePidOut;
 
@@ -748,6 +817,14 @@ void StartLogicTask(void const * argument)
         if(g_fMPU6050YawMovePidOut2 < 0) g_fMPU6050YawMovePidOut2 = 0;
 
         motorPidSetSpeed(g_fMPU6050YawMovePidOut1,g_fMPU6050YawMovePidOut2);
+        break;
+      }
+      case 5:
+        motorPidSetSpeed(0,0);
+        break;
+      default:
+        g_ucMode = 0;
+        motorPidSetSpeed(0,0);
         break;
     }
     //绝对延时

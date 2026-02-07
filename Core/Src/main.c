@@ -73,14 +73,16 @@ void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN 0 */
 float Get_Distance_Filtered(void)
 {
-  float sum = 0;
-  for(int i = 0; i < 3; i++) {
-    sum += HC_SR04_Read();
-    // 将 HAL_Delay 换成 osDelay
-    // 这样在等待传感器的 5ms 里，CPU 可以去跑 LogicTask 或 UI 任务
-    osDelay(5);
+  static float last_valid = 30.0f;
+  float distance = HC_SR04_Read();
+  if ((distance <= 0.0f) || (distance > 300.0f))
+  {
+    osDelay(1);
+    return last_valid;
   }
-  return sum / 3.0;
+  last_valid = (0.7f * last_valid) + (0.3f * distance);
+  osDelay(1);
+  return last_valid;
 }
 
 
