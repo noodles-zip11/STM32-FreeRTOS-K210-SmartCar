@@ -791,6 +791,7 @@ void StartLogicTask(void const * argument)
     //走直线
       case 4:
       {
+        float speed_sync;
         float yaw_err = mpu6050Movement.target_val - snap.yaw;
         while (yaw_err > 180.0f) yaw_err -= 360.0f;
         while (yaw_err < -180.0f) yaw_err += 360.0f;
@@ -807,9 +808,15 @@ void StartLogicTask(void const * argument)
         if (g_fMPU6050YawMovePidOut > 0.6f) g_fMPU6050YawMovePidOut = 0.6f;
         if (g_fMPU6050YawMovePidOut < -0.6f) g_fMPU6050YawMovePidOut = -0.6f;
 
-        g_fMPU6050YawMovePidOut1 = 1.5 + g_fMPU6050YawMovePidOut;
+//        speed_sync = 0.15f * (Motor2Speed - Motor1Speed);
+//        if (speed_sync > 0.35f) speed_sync = 0.35f;
+//        if (speed_sync < -0.35f) speed_sync = -0.35f;
 
-        g_fMPU6050YawMovePidOut2 = 1.5 - g_fMPU6050YawMovePidOut;
+//        g_fMPU6050YawMovePidOut1 = 1.5f + g_fMPU6050YawMovePidOut + speed_sync;
+        g_fMPU6050YawMovePidOut1 = 1.5f + g_fMPU6050YawMovePidOut;
+
+//        g_fMPU6050YawMovePidOut2 = 1.5f - g_fMPU6050YawMovePidOut - speed_sync;
+        g_fMPU6050YawMovePidOut2 = 1.5f - g_fMPU6050YawMovePidOut;
 
         if(g_fMPU6050YawMovePidOut1 >3.5) g_fMPU6050YawMovePidOut1 =3.5;
         if(g_fMPU6050YawMovePidOut1 < 0 ) g_fMPU6050YawMovePidOut1 =0;
