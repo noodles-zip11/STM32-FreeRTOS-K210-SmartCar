@@ -88,6 +88,15 @@ float g_pid_out = 0.0;
 float g_pid_out1 = 0.0;
 float g_pid_out2 = 0.0;
 
+#define LINE_VISION_FRESH_MS      150U
+#define LINE_VISION_STOP_MS       800U
+#define LINE_VISION_QUALITY_TH    350
+#define LINE_VISION_ERR_LPF_A     0.30f
+#define LINE_VISION_SLOW_GAIN     0.80f
+#define LINE_VISION_SEARCH_TURN   0.60f
+#define LINE_VISION_DEBUG_UART1_EN 1
+#define LINE_VISION_DEBUG_MS      100U
+
 //蓝牙接收
 uint8_t g_ucusrtrecivedate;
 
@@ -141,11 +150,27 @@ static inline void avoid_set_state(AvoidState state, uint32_t duration_ms)
 //全局数据快照
 static volatile SensorSnapshot g_sensor_snapshot;
 
+typedef enum {
+  LINE_VISION_TRACK = 0,
+  LINE_VISION_SEARCH,
+  LINE_VISION_LOST_STOP
+} LineVisionState;
+
+typedef struct {
+  float err_f;
+  int16_t quality;
+  TickType_t tick;
+  int8_t sign;
+} VisionRuntime;
+
+static volatile VisionRuntime g_vision_runtime = {0.0f, 0, 0, 1};
+static LineVisionState g_line_vision_state = LINE_VISION_LOST_STOP;
+
 //准备队列静态内存和创建静态队列
 static StaticQueue_t xCommandQueueBuffer;
 static uint8_t ucCommandQueueStorage[10 * sizeof(uint8_t)];
 static StaticQueue_t xVisionQueueBuffer;
-static uint8_t ucVisionQueueStorage[5 * sizeof(VisionData_t)];
+static uint8_t ucVisionQueueStorage[1 * sizeof(VisionData_t)];
 static StaticQueue_t xMotorTargetQueueBuffer;
 static uint8_t ucMotorTargetQueueStorage[1 * sizeof(MotorTarget_t)];
 
@@ -294,6 +319,7 @@ static void ui_draw_line(uint8_t row, const char *text);
 static void ui_draw_status(void);
 //vofa
 static void vofa_send_waveform(float target_speed, float actual_speed);
+static float clampf(float v, float vmin, float vmax);
 
 /* USER CODE END FunctionPrototypes */
 // void StartDefaultTask(void const * argument);
@@ -329,7 +355,7 @@ void MX_FREERTOS_Init(void) {
   //创造队列
   CommandQueueHandle = xQueueCreateStatic(10, sizeof(uint8_t),
                                           ucCommandQueueStorage, &xCommandQueueBuffer);
-  VisionQueueHandle = xQueueCreateStatic(5, sizeof(VisionData_t),
+  VisionQueueHandle = xQueueCreateStatic(1, sizeof(VisionData_t),
                                          ucVisionQueueStorage, &xVisionQueueBuffer);
   MotorTargetQueueHandle = xQueueCreateStatic(1, sizeof(MotorTarget_t),
                                               ucMotorTargetQueueStorage, &xMotorTargetQueueBuffer);
@@ -569,18 +595,59 @@ void StartSensorTask(void const * argument)
 void StartVisionTask(void const * argument)
 {
   /* USER CODE BEGIN StartVisionTask */
-
   VisionData_t data;
+  VisionData_t latest;
+  TickType_t last_debug_tick = 0;
   /* Infinite loop */
   for(;;)
   {
-    if (xQueueReceive(VisionQueueHandle, &data, pdMS_TO_TICKS(20)) == pdTRUE)
+    if (xQueueReceive(VisionQueueHandle, &latest, pdMS_TO_TICKS(20)) == pdTRUE)
     {
-      // 这里处理 data.x / data.y
-      // 例如更新目标或者保存到全局结构�?
-      // last_vision_tick = xTaskGetTickCount();
+      float err;
+      float err_f;
+      TickType_t now_tick;
+      int16_t quality;
+
+      // Queue length is 1, this loop is kept for compatibility if size changes later.
+      while (xQueueReceive(VisionQueueHandle, &data, 0) == pdTRUE) latest = data;
+
+      err = (float)latest.x * 0.001f;
+      err = clampf(err, -1.0f, 1.0f);
+
+      quality = latest.y;
+      if (quality < 0) quality = 0;
+      if (quality > 1000) quality = 1000;
+
+      now_tick = xTaskGetTickCount();
+      taskENTER_CRITICAL();
+      g_vision_runtime.err_f += LINE_VISION_ERR_LPF_A * (err - g_vision_runtime.err_f);
+      g_vision_runtime.quality = quality;
+      g_vision_runtime.tick = now_tick;
+      g_vision_runtime.sign = (g_vision_runtime.err_f >= 0.0f) ? 1 : -1;
+      err_f = g_vision_runtime.err_f;
+      taskEXIT_CRITICAL();
+
+#if LINE_VISION_DEBUG_UART1_EN
+      if ((now_tick - last_debug_tick) >= pdMS_TO_TICKS(LINE_VISION_DEBUG_MS))
+      {
+        char msg[80];
+        int n = snprintf(
+          msg,
+          sizeof(msg),
+          "VRAW x=%d y=%d err=%ld q=%d\r\n",
+          (int)latest.x,
+          (int)latest.y,
+          (long)(err_f * 1000.0f),
+          (int)quality
+        );
+        if (n > 0)
+        {
+          HAL_UART_Transmit(&huart1, (uint8_t *)msg, (uint16_t)n, 20);
+        }
+        last_debug_tick = now_tick;
+      }
+#endif
     }
-    //osDelay(5);
   }
   /* USER CODE END StartVisionTask */
 }
@@ -666,6 +733,13 @@ void StartLogicTask(void const * argument)
       g_fMPU6050YawMovePidOut = 0.0f;
       g_fMPU6050YawMovePidOut1 = 0.0f;
       g_fMPU6050YawMovePidOut2 = 0.0f;
+      taskENTER_CRITICAL();
+      g_vision_runtime.err_f = 0.0f;
+      g_vision_runtime.quality = 0;
+      g_vision_runtime.tick = 0;
+      g_vision_runtime.sign = 1;
+      taskEXIT_CRITICAL();
+      g_line_vision_state = LINE_VISION_LOST_STOP;
       avoid_state = AVOID_IDLE;
       if (g_ucMode == 4)
       {
@@ -692,38 +766,73 @@ void StartLogicTask(void const * argument)
       //循迹（未完成）
       case 1:
       {
-        int8_t s0 = (g_read[0] == 1);
-        int8_t s1 = (g_read[1] == 1);
-        int8_t s2 = (g_read[2] == 1);
-        int8_t s3 = (g_read[3] == 1);
-        int8_t count = s0 + s1 + s2 + s3;
-        float base_speed = g_line_base_speed;
+        TickType_t vision_age;
+        TickType_t vision_tick;
+        TickType_t now_tick = xTaskGetTickCount();
+        float vision_err;
+        float base_speed;
+        int16_t vision_quality;
+        int8_t vision_sign;
 
-        if (count > 0)
+        taskENTER_CRITICAL();
+        vision_err = g_vision_runtime.err_f;
+        vision_quality = g_vision_runtime.quality;
+        vision_tick = g_vision_runtime.tick;
+        vision_sign = g_vision_runtime.sign;
+        taskEXIT_CRITICAL();
+
+        if (vision_tick == 0)
         {
-          int8_t sum = (-3 * s0) + (-1 * s1) + (1 * s2) + (3 * s3);
-          g_thisstate = sum / count;
-          base_speed = g_line_base_speed;
+          vision_age = pdMS_TO_TICKS(LINE_VISION_STOP_MS + 1U);
         }
         else
         {
-          g_thisstate = (g_laststate >= 0) ? 3 : -3;
-          base_speed = g_line_search_speed;
+          vision_age = now_tick - vision_tick;
         }
 
-        g_pid_out = PID_realize(&pid_pidHW_Tracking, g_thisstate, dt);
+        if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
+            (vision_quality >= LINE_VISION_QUALITY_TH))
+        {
+          g_line_vision_state = LINE_VISION_TRACK;
+        }
+        else if (vision_age <= pdMS_TO_TICKS(LINE_VISION_STOP_MS))
+        {
+          g_line_vision_state = LINE_VISION_SEARCH;
+        }
+        else
+        {
+          g_line_vision_state = LINE_VISION_LOST_STOP;
+        }
 
-        g_pid_out1 = base_speed + g_pid_out;
-        g_pid_out2 = base_speed - g_pid_out;
+        if (g_line_vision_state == LINE_VISION_TRACK)
+        {
+          float track_state = vision_err * 3.0f; // keep close to old 4-sensor scale
+          base_speed = g_line_base_speed - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
+          if (base_speed < g_line_search_speed) base_speed = g_line_search_speed;
 
-        if (g_pid_out1 > g_line_max_speed) g_pid_out1 = g_line_max_speed;
-        if (g_pid_out2 > g_line_max_speed) g_pid_out2 = g_line_max_speed;
-        if (g_pid_out1 < g_line_min_speed) g_pid_out1 = g_line_min_speed;
-        if (g_pid_out2 < g_line_min_speed) g_pid_out2 = g_line_min_speed;
-
-        motorPidSetSpeed(g_pid_out1, g_pid_out2);
-
-        g_laststate = g_thisstate;
+          g_pid_out = PID_realize(&pid_pidHW_Tracking, track_state, dt);
+          g_pid_out1 = base_speed + g_pid_out;
+          g_pid_out2 = base_speed - g_pid_out;
+          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
+          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          motorPidSetSpeed(g_pid_out1, g_pid_out2);
+        }
+        else if (g_line_vision_state == LINE_VISION_SEARCH)
+        {
+          float turn = LINE_VISION_SEARCH_TURN * (float)vision_sign;
+          g_pid_out1 = g_line_search_speed + turn;
+          g_pid_out2 = g_line_search_speed - turn;
+          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
+          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          motorPidSetSpeed(g_pid_out1, g_pid_out2);
+        }
+        else
+        {
+          g_pid_out = 0.0f;
+          g_pid_out1 = 0.0f;
+          g_pid_out2 = 0.0f;
+          motorPidSetSpeed(0,0);
+        }
         break;
       }
 
@@ -1088,6 +1197,13 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
 //   }
 // }
 //万能数据读写助手，UI 逻辑都统一按 32 位处理
+static float clampf(float v, float vmin, float vmax)
+{
+  if (v < vmin) return vmin;
+  if (v > vmax) return vmax;
+  return v;
+}
+
 static int32_t ui_get_int(const MenuItem *item)
 {
   if (item == 0 || item->value_ptr == 0) return 0;

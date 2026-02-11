@@ -37,6 +37,7 @@
 #include "inv_mpu.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -261,8 +262,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         data.x = (int16_t)((rx_data_buf[0] << 8) | rx_data_buf[1]);
         data.y = (int16_t)((rx_data_buf[2] << 8) | rx_data_buf[3]);
 
-        // 【关键改变】发送结构体到队列，而不是直接改全局变量
-        xQueueSendFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
+        // Keep the latest frame only; VisionQueue length is 1.
+        xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
       }
       rx_state = 0;
     }
