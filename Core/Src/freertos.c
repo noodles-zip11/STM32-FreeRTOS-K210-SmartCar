@@ -40,6 +40,7 @@
 // #include "adc.h"
 #include "iwdg.h"
 #include "queue.h"
+#include "settings.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -415,7 +416,8 @@ void StartDefaultTask(void const * argument)
 
   for(;;)
   {
-    osDelay(1);
+    settings_service();
+    osDelay(20);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -1122,6 +1124,20 @@ void StartTask06(void const * argument)
 
       if (up_evt.long_press)
       {
+        uint8_t changed = 0;
+        if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
+        {
+          float now_v = *(float *)item->value_ptr;
+          changed = (fabsf(now_v - edit_backup_f) > 0.0001f) ? 1U : 0U;
+        }
+        else
+        {
+          changed = (ui_get_int(item) != edit_backup_i) ? 1U : 0U;
+        }
+        if (changed)
+        {
+          settings_mark_dirty();
+        }
         view = UI_VIEW_MENU;
         redraw_pending = 1;
         last_draw = 0;

@@ -38,6 +38,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
+#include "settings.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -61,6 +62,7 @@
 extern uint8_t g_ucusrtrecivedate;
 extern uint8_t  RxBuffer;
 extern volatile TickType_t g_last_cmd_tick;
+extern volatile uint8_t g_ucMode;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -142,6 +144,8 @@ int main(void)
 
   // --- 3. 算法参数初始化 ---
   PID_init();
+  settings_load();
+  g_ucMode = 0;
 
   // --- 4. 传感器初始化 (去掉打印，只做事) ---
   HAL_Delay(500); // 等待上电稳定

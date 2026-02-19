@@ -49,6 +49,7 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/Inc/oled.h
         Core/Inc/oledfont.h
         Core/Inc/pid.h
+        Core/Inc/settings.h
         Core/Src/cJSON.c
         Core/Src/HC_SR04.c
         Core/Src/inv_mpu.c
@@ -59,6 +60,7 @@ add_executable(${CMAKE_PROJECT_NAME}
         Core/Src/niming.c
         Core/Src/oled.c
         Core/Src/pid.c
+        Core/Src/settings.c
         Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_iwdg.h
 )
 
