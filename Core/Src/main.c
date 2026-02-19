@@ -47,7 +47,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define UART3_CMD_ENABLE 0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -136,7 +136,7 @@ int main(void)
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
 
   // --- 2. 串口与通信启动 ---
-  __HAL_UART_ENABLE_IT(&huart1, UART_IT_RXNE);
+  // USART1 is used for debug TX only. Keep RX interrupt disabled to avoid IRQ storm.
   HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
   HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
 
@@ -227,9 +227,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   // === 1. 蓝牙/遥控处理 (UART3) ===
   if (huart == &huart3)
   {
-    // 直接把收到的字符丢进队列，不做逻辑判断
-    xQueueSendFromISR(CommandQueueHandle, &g_ucusrtrecivedate, &xHigherPriorityTaskWoken);
-    g_last_cmd_tick = xTaskGetTickCountFromISR();
+    uint8_t cmd = g_ucusrtrecivedate;
+    // Only allow expected control keys, shielding random serial noise.
+    if (CommandQueueHandle != NULL &&
+        (cmd == 'A' || cmd == 'B' || cmd == 'C' || cmd == 'D' ||
+         cmd == 'E' || cmd == 'F' || cmd == 'G' || cmd == 'H' ||
+         cmd == 'I' || cmd == 'J' || cmd == 'K'))
+    {
+#if UART3_CMD_ENABLE
+      xQueueSendFromISR(CommandQueueHandle, &g_ucusrtrecivedate, &xHigherPriorityTaskWoken);
+#endif
+    }
 
     // 继续接收
     HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
@@ -263,7 +271,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         data.y = (int16_t)((rx_data_buf[2] << 8) | rx_data_buf[3]);
 
         // Keep the latest frame only; VisionQueue length is 1.
-        xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
+        if (VisionQueueHandle != NULL)
+        {
+          xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
+        }
       }
       rx_state = 0;
     }
