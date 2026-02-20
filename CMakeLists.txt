@@ -74,7 +74,8 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    # OpenOCD FreeRTOS thread-awareness compatibility symbol.
+    Core/Src/freertos_openocd_compat.c
 )
 
 # Add include paths
@@ -94,6 +95,7 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 add_link_options(--specs=nano.specs)
 
 add_link_options(--specs=nosys.specs)
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -Wl,--undefined=uxTopUsedPriority)
 
 
 # Add linked libraries
