@@ -48,7 +48,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define UART3_CMD_ENABLE 0
+#define UART3_CMD_ENABLE 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
