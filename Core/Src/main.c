@@ -63,6 +63,32 @@ extern uint8_t g_ucusrtrecivedate;
 extern uint8_t  RxBuffer;
 extern volatile TickType_t g_last_cmd_tick;
 extern volatile uint8_t g_ucMode;
+
+/* Vision UART2 parser state (file-scope so ErrorCallback can reset it). */
+static uint8_t s_vision_rx_state = 0;
+static uint8_t s_vision_rx_data_cnt = 0;
+static uint8_t s_vision_rx_data_buf[4] = {0};
+
+/* Vision UART2 debug counters (read these in debugger Watches). */
+volatile uint32_t g_uart2_rx_irq_count = 0;
+volatile uint32_t g_vision_pkt_total = 0;
+volatile uint32_t g_vision_pkt_ok = 0;
+volatile uint32_t g_vision_pkt_bad = 0;
+volatile uint32_t g_vision_queue_null = 0;
+volatile uint32_t g_vision_queue_overwrite_fail = 0;
+volatile uint32_t g_vision_header_miss = 0;
+volatile uint8_t g_vision_rx_state_dbg = 0;
+volatile uint8_t g_vision_rx_last_byte = 0;
+volatile uint8_t g_vision_rx_last_sum = 0;
+volatile uint8_t g_vision_rx_last_calc_sum = 0;
+volatile int16_t g_vision_rx_last_x = 0;
+volatile int16_t g_vision_rx_last_y = 0;
+volatile uint32_t g_uart2_err_total = 0;
+volatile uint32_t g_uart2_err_ore = 0;
+volatile uint32_t g_uart2_err_fe = 0;
+volatile uint32_t g_uart2_err_ne = 0;
+volatile uint32_t g_uart2_err_pe = 0;
+volatile uint32_t g_uart2_recover_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -251,42 +277,97 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     uint8_t res = RxBuffer;
 
-    // 状态机保留在中断里！因为处理单字节非常快，不需要通过队列传单个字节（太浪费资源）
-    static uint8_t rx_state = 0;
-    static uint8_t rx_data_cnt = 0;
-    static uint8_t rx_data_buf[4];
+    g_uart2_rx_irq_count++;
+    g_vision_rx_last_byte = res;
 
-    if(rx_state == 0) {
-      if(res == 0xFF) rx_state = 1; else rx_state = 0;
-    }
-    else if(rx_state == 1) {
-      if(res == 0xFE) rx_state = 2; else rx_state = 0;
-    }
-    else if(rx_state == 2) {
-      rx_data_buf[rx_data_cnt++] = res;
-      if(rx_data_cnt >= 4) { rx_state = 3; rx_data_cnt = 0; }
-    }
-    else if(rx_state == 3) {
-      uint8_t calc_sum = (rx_data_buf[0] + rx_data_buf[1] + rx_data_buf[2] + rx_data_buf[3]) & 0xFF;
-      if(res == calc_sum) {
-        // 校验成功！打包数据
-        VisionData_t data;
-        data.x = (int16_t)((rx_data_buf[0] << 8) | rx_data_buf[1]);
-        data.y = (int16_t)((rx_data_buf[2] << 8) | rx_data_buf[3]);
-
-        // Keep the latest frame only; VisionQueue length is 1.
-        if (VisionQueueHandle != NULL)
-        {
-          xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
-        }
+    if (s_vision_rx_state == 0U) {
+      if (res == 0xFFU) {
+        s_vision_rx_state = 1U;
+      } else {
+        g_vision_header_miss++;
       }
-      rx_state = 0;
     }
+    else if (s_vision_rx_state == 1U) {
+      if (res == 0xFEU) {
+        s_vision_rx_state = 2U;
+      } else if (res == 0xFFU) {
+        /* Keep state=1 for repeated header byte to speed up re-sync. */
+        s_vision_rx_state = 1U;
+      } else {
+        s_vision_rx_state = 0U;
+        g_vision_header_miss++;
+      }
+    }
+    else if (s_vision_rx_state == 2U) {
+      s_vision_rx_data_buf[s_vision_rx_data_cnt++] = res;
+      if (s_vision_rx_data_cnt >= 4U) {
+        s_vision_rx_state = 3U;
+        s_vision_rx_data_cnt = 0U;
+      }
+    }
+    else if (s_vision_rx_state == 3U) {
+      uint8_t calc_sum = (s_vision_rx_data_buf[0] + s_vision_rx_data_buf[1] +
+                          s_vision_rx_data_buf[2] + s_vision_rx_data_buf[3]) & 0xFF;
+      g_vision_pkt_total++;
+      g_vision_rx_last_sum = res;
+      g_vision_rx_last_calc_sum = calc_sum;
+
+      if (res == calc_sum) {
+        VisionData_t data;
+        data.x = (int16_t)((s_vision_rx_data_buf[0] << 8) | s_vision_rx_data_buf[1]);
+        data.y = (int16_t)((s_vision_rx_data_buf[2] << 8) | s_vision_rx_data_buf[3]);
+        g_vision_rx_last_x = data.x;
+        g_vision_rx_last_y = data.y;
+        g_vision_pkt_ok++;
+
+        if (VisionQueueHandle != NULL) {
+          if (xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken) != pdPASS) {
+            g_vision_queue_overwrite_fail++;
+          }
+        } else {
+          g_vision_queue_null++;
+        }
+      } else {
+        g_vision_pkt_bad++;
+      }
+      s_vision_rx_state = 0U;
+    }
+
+    g_vision_rx_state_dbg = s_vision_rx_state;
     HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   }
-
   // 如果队列唤醒了高优先级任务，进行调度
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    uint32_t err = huart->ErrorCode;
+    g_uart2_err_total++;
+    if ((err & HAL_UART_ERROR_ORE) != 0U) g_uart2_err_ore++;
+    if ((err & HAL_UART_ERROR_FE)  != 0U) g_uart2_err_fe++;
+    if ((err & HAL_UART_ERROR_NE)  != 0U) g_uart2_err_ne++;
+    if ((err & HAL_UART_ERROR_PE)  != 0U) g_uart2_err_pe++;
+
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+
+    s_vision_rx_state = 0U;
+    s_vision_rx_data_cnt = 0U;
+    g_vision_rx_state_dbg = 0U;
+    (void)HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
+    g_uart2_recover_count++;
+  }
+  else if (huart->Instance == USART3)
+  {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    (void)HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
+  }
 }
 
 /* USER CODE END 4 */

@@ -773,8 +773,22 @@ void StartLogicTask(void const * argument)
         TickType_t now_tick = xTaskGetTickCount();
         float vision_err;
         float base_speed;
+        float line_base;
+        float line_search;
+        float line_min;
+        float line_max;
         int16_t vision_quality;
         int8_t vision_sign;
+
+        /* Runtime guard for invalid line parameters loaded from flash. */
+        line_base = g_line_base_speed;
+        line_search = g_line_search_speed;
+        line_min = g_line_min_speed;
+        line_max = g_line_max_speed;
+        if (line_max < 0.3f) line_max = 4.0f;
+        if (line_search < 0.2f) line_search = 1.5f;
+        if (line_base < 0.2f) line_base = 2.0f;
+        if (line_min > line_max) line_min = 0.5f;
 
         taskENTER_CRITICAL();
         vision_err = g_vision_runtime.err_f;
@@ -785,47 +799,47 @@ void StartLogicTask(void const * argument)
 
         if (vision_tick == 0)
         {
-          vision_age = pdMS_TO_TICKS(LINE_VISION_STOP_MS + 1U);
-        }
-        else
-        {
-          vision_age = now_tick - vision_tick;
-        }
-
-        if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
-            (vision_quality >= LINE_VISION_QUALITY_TH))
-        {
-          g_line_vision_state = LINE_VISION_TRACK;
-        }
-        else if (vision_age <= pdMS_TO_TICKS(LINE_VISION_STOP_MS))
-        {
+          /* No frame received yet: keep searching instead of hard stop. */
           g_line_vision_state = LINE_VISION_SEARCH;
         }
         else
         {
-          g_line_vision_state = LINE_VISION_LOST_STOP;
+          vision_age = now_tick - vision_tick;
+          if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
+              (vision_quality >= LINE_VISION_QUALITY_TH))
+          {
+            g_line_vision_state = LINE_VISION_TRACK;
+          }
+          else if (vision_age <= pdMS_TO_TICKS(LINE_VISION_STOP_MS))
+          {
+            g_line_vision_state = LINE_VISION_SEARCH;
+          }
+          else
+          {
+            g_line_vision_state = LINE_VISION_LOST_STOP;
+          }
         }
 
         if (g_line_vision_state == LINE_VISION_TRACK)
         {
           float track_state = vision_err * 3.0f; // keep close to old 4-sensor scale
-          base_speed = g_line_base_speed - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
-          if (base_speed < g_line_search_speed) base_speed = g_line_search_speed;
+          base_speed = line_base - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
+          if (base_speed < line_search) base_speed = line_search;
 
           g_pid_out = PID_realize(&pid_pidHW_Tracking, track_state, dt);
           g_pid_out1 = base_speed + g_pid_out;
           g_pid_out2 = base_speed - g_pid_out;
-          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
-          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          g_pid_out1 = clampf(g_pid_out1, line_min, line_max);
+          g_pid_out2 = clampf(g_pid_out2, line_min, line_max);
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else if (g_line_vision_state == LINE_VISION_SEARCH)
         {
           float turn = LINE_VISION_SEARCH_TURN * (float)vision_sign;
-          g_pid_out1 = g_line_search_speed + turn;
-          g_pid_out2 = g_line_search_speed - turn;
-          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
-          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          g_pid_out1 = line_search + turn;
+          g_pid_out2 = line_search - turn;
+          g_pid_out1 = clampf(g_pid_out1, line_min, line_max);
+          g_pid_out2 = clampf(g_pid_out2, line_min, line_max);
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else

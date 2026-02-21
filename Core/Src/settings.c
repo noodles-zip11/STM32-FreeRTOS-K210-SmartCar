@@ -166,6 +166,30 @@ static void settings_apply_payload(SettingsPayload *p)
   p->line_max = clampf(p->line_max, 0.0f, 8.0f);
   p->line_min = clampf(p->line_min, 0.0f, 8.0f);
 
+  /* If a stale/corrupted record saved all-zero line speeds, recover sane defaults. */
+  if ((p->line_base < 0.05f) && (p->line_search < 0.05f) && (p->line_max < 0.05f))
+  {
+    p->line_base = 2.0f;
+    p->line_search = 1.5f;
+    p->line_max = 4.0f;
+    p->line_min = 0.5f;
+  }
+
+  if (p->line_max < 0.3f)
+  {
+    p->line_max = 4.0f;
+  }
+
+  if (p->line_search < 0.2f)
+  {
+    p->line_search = 1.5f;
+  }
+
+  if (p->line_base < 0.2f)
+  {
+    p->line_base = 2.0f;
+  }
+
   if (p->line_min > p->line_max)
   {
     p->line_min = 0.5f;
