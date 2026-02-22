@@ -48,7 +48,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define UART3_CMD_ENABLE 0
+#define UART3_CMD_ENABLE 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -79,6 +79,12 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/*
+ * 超声波读数做“有效性判断 + 一阶低通”：
+ * 1) 先过滤掉明显异常值（<=0 或过大）；
+ * 2) 用上一次有效值兜底，避免上层逻辑突然拿到 0；
+ * 3) 正常值用低通减小跳变，让避障/跟随更稳定。
+ */
 float Get_Distance_Filtered(void)
 {
   static float last_valid = 30.0f;
@@ -95,6 +101,7 @@ float Get_Distance_Filtered(void)
 
 int __io_putchar(int ch)
 {
+  /* printf 重定向到串口1，方便调试打印。 */
   uint8_t c = (uint8_t)ch;
   (void)HAL_UART_Transmit(&huart1, &c, 1, 10);
   return ch;
@@ -144,24 +151,32 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   // --- 1. 电机与编码器启动 ---
+  /* 先启动 PWM/编码器，后续控制任务启动后才能马上闭环控制，不用再等外设准备。 */
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
 
   // --- 2. 串口与通信启动 ---
+  /*
+   * 串口接收顺序说明：
+   * - UART3 命令口现在就开启，尽早响应蓝牙/遥控；
+   * - UART2 视觉口放到 VisionTask 中开启，因为它依赖消息队列已经创建完成。
+   */
   // USART1 is used for debug TX only. Keep RX interrupt disabled to avoid IRQ storm.
 #if UART3_CMD_ENABLE
   HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
 #endif
-  HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
+  /* Start UART2 vision RX after FreeRTOS queues/tasks are ready (in VisionTask). */
 
   // --- 3. 算法参数初始化 ---
+  /* PID 先给默认值，再从 Flash 覆盖成上次保存值，启动状态更可控。 */
   PID_init();
   settings_load();
   g_ucMode = 0;
 
   // --- 4. 传感器初始化 (去掉打印，只做事) ---
+  /* IMU 初始化前延时一小段时间，给上电和传感器内部稳态一点缓冲。 */
   HAL_Delay(500); // 等待上电稳定
   MPU_Init();     // 初始化MPU6050
   mpu_dmp_init();
@@ -241,6 +256,13 @@ extern osMessageQId VisionQueueHandle;
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  /*
+   * 这个回调同时处理两个串口：
+   * - UART3：单字节命令（蓝牙/遥控）
+   * - UART2：视觉模块数据帧（按协议拆包）
+   * 中断里只做快速动作（入队、推进状态机、重挂接收），
+   * 复杂计算留给任务上下文，避免阻塞其它中断。
+   */
 
   // === 1. 蓝牙/遥控处理 (UART3) ===
   if (huart == &huart3)
@@ -265,6 +287,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     uint8_t res = RxBuffer;
 
+    /*
+     * 视觉帧协议（当前实现）：
+     *   帧头 0xFF 0xFE + 4字节数据(x,y) + 1字节校验和
+     * 使用逐字节状态机的原因：
+     * - 内存占用小，不需要大缓存；
+     * - 丢字节后可以靠帧头快速重新同步。
+     */
     if (s_vision_rx_state == 0U) {
       if (res == 0xFFU) {
         s_vision_rx_state = 1U;
@@ -293,6 +322,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
       if (res == calc_sum) {
         VisionData_t data;
+        /* 校验通过后再覆盖队列，保证逻辑任务拿到的是“最新有效帧”。 */
         data.x = (int16_t)((s_vision_rx_data_buf[0] << 8) | s_vision_rx_data_buf[1]);
         data.y = (int16_t)((s_vision_rx_data_buf[2] << 8) | s_vision_rx_data_buf[3]);
         if (VisionQueueHandle != NULL) {
@@ -305,6 +335,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   }
   // 如果队列唤醒了高优先级任务，进行调度
+  /* 若 ISR 中唤醒了更高优先级任务，立即请求一次上下文切换。 */
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -312,6 +343,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART2)
   {
+    /* 清错误标志 + 重置状态机，避免视觉串口卡在半帧状态。 */
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
@@ -322,6 +354,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   }
   else if (huart->Instance == USART3)
   {
+    /* 命令串口出错后要重新挂接收中断，不然之后会“静默失联”。 */
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);

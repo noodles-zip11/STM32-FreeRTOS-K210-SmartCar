@@ -12,8 +12,14 @@ tpid mpu6050Movement ;
 
 
 
+/*
+ * 统一初始化本项目里用到的几个 PID 实例。
+ * 这样做的目的不是“图省事”，而是避免某个控制器忘记清积分/误差缓存，
+ * 上电后直接带着脏状态运行，导致一开始就抖动或冲一下。
+ */
 void PID_init(void)
 {
+    /* 左轮速度环：输出最终会映射到 PWM，占空比上限按 100 附近设置。 */
     pidMotor1Speed.actual_val=0.0;
     pidMotor1Speed.target_val=0.0;
     pidMotor1Speed.output_val=0.0;
@@ -28,6 +34,7 @@ void PID_init(void)
     pidMotor1Speed.d_filter_alpha=0.2;
     pidMotor1Speed.d_out=0.0;
 
+    /* 右轮速度环：先和左轮保持一致，后期可单独微调补偿机械差异。 */
     pidMotor2Speed.actual_val=0.0;
     pidMotor2Speed.target_val=0.0;
     pidMotor2Speed.output_val=0.0;
@@ -42,6 +49,7 @@ void PID_init(void)
     pidMotor2Speed.d_filter_alpha=0.2;
     pidMotor2Speed.d_out=0.0;
 
+    /* 巡线转向 PID：目标是偏差回零，kp 为负用于匹配当前左右轮修正方向。 */
     pid_pidHW_Tracking.actual_val=0.0;
     pid_pidHW_Tracking.target_val=0.0;
     pid_pidHW_Tracking.output_val=0.0;
@@ -57,6 +65,7 @@ void PID_init(void)
     pid_pidHW_Tracking.d_out=0.0;
 
 
+    /* 跟随模式距离 PID：目标距离约 22.5cm，输出直接作为前进/后退速度。 */
     pidFollow.actual_val=0.0;
     pidFollow.target_val=22.50;
     pidFollow.output_val=0.0;
@@ -71,6 +80,7 @@ void PID_init(void)
     pidFollow.d_filter_alpha=0.2;
     pidFollow.d_out=0.0;
 
+    /* 航向保持微调 PID：只负责纠偏，不负责主速度，所以 kp 设置较小。 */
     mpu6050Movement.actual_val=0.0;
     mpu6050Movement.target_val=0.0;
     mpu6050Movement.output_val=0.0;
@@ -91,6 +101,7 @@ void PID_init(void)
 
 float P_realize(tpid * pid,float actual_val)
 {
+    /* 纯 P 控制：结构简单、响应快，但一般会留稳态误差。 */
     pid->actual_val=actual_val;
     pid->err = pid->target_val - pid->actual_val;
     pid->actual_val = pid->kp * pid->err ;
@@ -102,6 +113,7 @@ float P_realize(tpid * pid,float actual_val)
 
 float PI_realize(tpid * pid,float actual_val)
 {
+    /* 在 P 的基础上加积分，解决“误差一直差一点点”的情况。 */
     pid->actual_val=actual_val;
     pid->err = pid->target_val - pid->actual_val;
     pid->err_sum += pid->err;
@@ -117,6 +129,13 @@ float PID_realize(tpid * pid,float actual_val,float dt)
     float output_limited;
     int saturating;
 
+    /*
+     * 这里是项目里最常用的速度/方向控制器：
+     * - 用 dt 计算积分和微分，适配任务周期微小抖动；
+     * - 积分限幅防止累积过头；
+     * - D 项低通减少编码器噪声放大；
+     * - 输出限幅后做条件积分，减轻积分饱和。
+     */
     pid->actual_val = actual_val;
     pid->err = pid->target_val - pid->actual_val;
 
@@ -128,6 +147,7 @@ float PID_realize(tpid * pid,float actual_val,float dt)
     }
 
     //修正d的 用滤波
+    /* D 项用“误差变化率”，再做一阶低通，避免瞬时尖峰把输出拉爆。 */
     d_raw = (pid->err - pid->err_last)/ dt ;
     pid->d_out += pid->d_filter_alpha * (d_raw - pid->d_out);
 
@@ -139,6 +159,7 @@ float PID_realize(tpid * pid,float actual_val,float dt)
         if (output_limited < -pid->max_output) output_limited = -pid->max_output;
     }
 
+    /* 输出已经打满且误差还在往同方向推时，不继续累积积分（抗积分饱和）。 */
     saturating = (pid->max_output > 0.0) && (output_limited != output_raw);
     if (!(saturating && ((output_raw > pid->max_output && pid->err > 0.0) ||
         (output_raw < -pid->max_output && pid->err < 0.0))))
@@ -155,6 +176,10 @@ float PID_realize(tpid * pid,float actual_val,float dt)
 
 void PID_Reset(tpid * pid)
 {
+    /*
+     * 只清运行时状态，不改 kp/ki/kd 参数。
+     * 常用于目标速度反向切换时，避免旧积分项造成反向瞬间过冲。
+     */
     pid->actual_val = 0.0;
     pid->err = 0.0;
     pid->err_last = 0.0;

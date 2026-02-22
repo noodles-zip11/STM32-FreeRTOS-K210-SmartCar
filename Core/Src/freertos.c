@@ -52,12 +52,21 @@
 /* USER CODE BEGIN PD */
 
 //pid变量
+/*
+ * 巡线模式参数（同时也是 UI 可调参数，会被 settings 模块持久化）。
+ * 放在全局是因为逻辑任务/UI/Flash 保存都会访问。
+ */
 float g_line_base_speed = 2.0f;
 float g_line_search_speed = 1.5f;
 float g_line_max_speed = 4.0f;
 float g_line_min_speed = 0.5f;
 
 //电机测速和设置速度
+/*
+ * 编码器计数与速度反馈：
+ * EncoderXCount 是单个控制周期内的增量计数；
+ * MotorXSpeed 是换算后的实际速度（给 PID 和状态显示使用）。
+ */
 short Encoder1Count =0 ;
 short Encoder2Count =0 ;
 float Motor1Speed = 0.00;
@@ -69,6 +78,7 @@ extern tpid pidMotor2Speed;
 float mile =0.00 ;
 
 //串口手动控制超时
+/* 串口手动控制状态：用于区分“手动命令”与“自动模式逻辑”。 */
 volatile TickType_t g_last_cmd_tick = 0;
 volatile uint8_t g_uart_manual_active = 0;
 
@@ -115,6 +125,10 @@ uint8_t  RxBuffer;
 static TickType_t g_vofa_tx_tick = 0;
 
 //数据快照结构体
+/*
+ * 传感器快照（SensorTask 写，LogicTask 读）。
+ * seq 使用“前后自增”的方式，读线程可通过双读检查拿到一致快照。
+ */
 typedef struct {
   uint32_t seq;
   uint8_t hw[4];
@@ -141,6 +155,7 @@ TickType_t avoid_deadline = 0;
 //跟随时传递状态和停留时间函数
 static inline void avoid_set_state(AvoidState state, uint32_t duration_ms)
 {
+  /* 统一设置避障状态和状态持续时间，避免重复写 tick 换算。 */
   avoid_state = state;
   avoid_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(duration_ms);
 }
@@ -162,10 +177,18 @@ typedef struct {
   int8_t sign;
 } VisionRuntime;
 
+/*
+ * 视觉运行态由 VisionTask 更新，LogicTask 读取。
+ * sign 用于丢线后按“上次偏差方向”继续搜索，避免来回乱转。
+ */
 static volatile VisionRuntime g_vision_runtime = {0.0f, 0, 0, 0, 1};
 static LineVisionState g_line_vision_state = LINE_VISION_LOST_STOP;
 
 //准备队列静态内存和创建静态队列
+/*
+ * 静态队列/任务内存：
+ * 使用静态分配能让 RAM 占用更可控，减少运行时动态分配失败风险。
+ */
 static StaticQueue_t xCommandQueueBuffer;
 static uint8_t ucCommandQueueStorage[10 * sizeof(uint8_t)];
 static StaticQueue_t xVisionQueueBuffer;
@@ -174,6 +197,7 @@ static StaticQueue_t xMotorTargetQueueBuffer;
 static uint8_t ucMotorTargetQueueStorage[1 * sizeof(MotorTarget_t)];
 
 //准备任务静态内存和TCB
+/* 各任务的静态 TCB/栈空间。栈大小是按任务负载手工分配的。 */
 static StaticTask_t xDefaultTaskTCB;
 static StackType_t xDefaultTaskStack[128];
 static StaticTask_t xControlTaskTCB;
@@ -352,16 +376,31 @@ void MX_FREERTOS_Init(void) {
   /* Create the queue(s) */
 
   //创造队列
+  /*
+   * 三个关键队列：
+   * 1) CommandQueue：UART3 命令字节（异步输入）
+   * 2) VisionQueue：视觉最新数据（长度 1，覆盖旧值）
+   * 3) MotorTargetQueue：目标速度（长度 1，控制任务只取最新）
+   */
   CommandQueueHandle = xQueueCreateStatic(10, sizeof(uint8_t),
                                           ucCommandQueueStorage, &xCommandQueueBuffer);
   VisionQueueHandle = xQueueCreateStatic(1, sizeof(VisionData_t),
                                          ucVisionQueueStorage, &xVisionQueueBuffer);
   MotorTargetQueueHandle = xQueueCreateStatic(1, sizeof(MotorTarget_t),
                                               ucMotorTargetQueueStorage, &xMotorTargetQueueBuffer);
+  /* 启动阶段队列创建失败必须立刻暴露，避免后续空句柄运行。 */
   configASSERT(CommandQueueHandle != NULL);
   configASSERT(VisionQueueHandle != NULL);
   configASSERT(MotorTargetQueueHandle != NULL);
 
+  /*
+   * 任务职责分层：
+   * - ControlTask：电机速度闭环（高频、优先级高）
+   * - SensorTask/VisionTask：采集并做轻量预处理
+   * - LogicTask：模式切换与行为决策
+   * - StartUITask：本地菜单与参数编辑
+   * - DefaultTask：后台维护（如延迟保存参数）
+   */
   /* Create the thread(s) */
 //优先级排行
   //控制 1
@@ -410,10 +449,15 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  /*
+   * 后台维护任务：
+   * 当前主要负责 settings 的延迟保存，避免在 UI 按键过程中频繁写 Flash。
+   */
   /* Infinite loop */
 
   for(;;)
   {
+    /* 只做短小后台工作，保持任务简单稳定。 */
     settings_service();
     osDelay(20);
   }
@@ -430,6 +474,12 @@ void StartDefaultTask(void const * argument)
 void StartControlTask(void const * argument)
 {
   /* USER CODE BEGIN StartControlTask */
+  /*
+   * 电机速度闭环核心任务（10ms）：
+   * 输入：目标速度队列 + 编码器增量
+   * 输出：左右轮 PWM（通过 Motor_Set）
+   * 使用 vTaskDelayUntil 保持控制节拍稳定。
+   */
   TickType_t lastWakeTime = xTaskGetTickCount();// vTaskDelayUntil 使用的参考时间
   TickType_t lastTick = lastWakeTime; // 上一次计算 dt 的时间戳
   MotorTarget_t target;  // 队列里接收到的目标速度
@@ -457,6 +507,7 @@ void StartControlTask(void const * argument)
       float new_target_m1 = target.left;
       float new_target_m2 = target.right;
 
+      /* 目标方向反转时清 PID 状态，避免旧积分导致瞬间过冲。 */
       if ((last_target_m1 > 0.0f && new_target_m1 < 0.0f) ||
           (last_target_m1 < 0.0f && new_target_m1 > 0.0f))
       {
@@ -476,12 +527,14 @@ void StartControlTask(void const * argument)
     }
 
     //精准计算控制周期
+    /* 用实际 tick 差计算 dt，避免任务抖动让速度估算偏掉。 */
     TickType_t now = xTaskGetTickCount();
     dt = (now - lastTick) * 0.001f;
     if (dt <= 0.0f) dt = 0.01f;
     lastTick = now;
 
     //获得圈数
+    /* 读取本周期编码器增量后清零，下一周期重新累计。 */
     Encoder1Count=(short)__HAL_TIM_GET_COUNTER(&htim4);
     Encoder2Count=(short)__HAL_TIM_GET_COUNTER(&htim2);
 
@@ -497,6 +550,7 @@ void StartControlTask(void const * argument)
     Motor1Speed = (float)m1_enc_sign * raw_m1_speed;
     Motor2Speed = (float)m2_enc_sign * raw_m2_speed;
 
+    /* 先对速度做低通，能显著减小编码器抖动对 PID（尤其 D 项）的影响。 */
     m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
     m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
 
@@ -533,6 +587,11 @@ void StartControlTask(void const * argument)
 void StartSensorTask(void const * argument)
 {
   /* USER CODE BEGIN StartSensorTask */
+  /*
+   * 传感器采样任务（20ms）：
+   * 统一采集灰度、超声波、IMU，并整理成一份快照给逻辑任务使用。
+   * 好处是逻辑层不用关心每个驱动的调用顺序和耗时。
+   */
 
   TickType_t lastWakeTime = xTaskGetTickCount();
   SensorSnapshot snap;
@@ -560,6 +619,10 @@ void StartSensorTask(void const * argument)
     }
 
     //关中断打包数据
+    /*
+     * 使用 seq 前后自增形成“写入窗口”：
+     * 读取端如果看到 seq 变化或奇数，说明读到了半更新数据，会重读。
+     */
     taskENTER_CRITICAL();
     g_sensor_snapshot.seq++;
     if ((g_sensor_snapshot.seq & 1U) == 0U) g_sensor_snapshot.seq++;
@@ -602,7 +665,15 @@ void StartVisionTask(void const * argument)
   /* USER CODE BEGIN StartVisionTask */
   VisionData_t data;
   VisionData_t latest;
-  TickType_t last_print_tick = 0;
+  /*
+   * 视觉任务职责很克制：
+   * - 从队列取 ISR 已拆包的数据
+   * - 做误差缩放/质量裁剪/低通
+   * - 更新供逻辑任务使用的视觉运行态
+   * 不在这里直接控车，避免视觉延迟影响整体调度。
+   */
+  /* Start UART2 RX here so K210 traffic cannot flood main() init stage. */
+  HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   /* Infinite loop */
   for(;;)
   {
@@ -615,6 +686,7 @@ void StartVisionTask(void const * argument)
       // Queue length is 1, this loop is kept for compatibility if size changes later.
       while (xQueueReceive(VisionQueueHandle, &data, 0) == pdTRUE) latest = data;
 
+      /* 把视觉横向偏差缩放到较小范围，后面控制逻辑更容易调参。 */
       err = (float)latest.x * 0.001f;
       err = clampf(err, -1.0f, 1.0f);
 
@@ -623,6 +695,7 @@ void StartVisionTask(void const * argument)
       if (quality > 1000) quality = 1000;
 
       now_tick = xTaskGetTickCount();
+      /* 一次临界区内更新整组视觉状态，减少逻辑任务读到“半更新状态”的概率。 */
       taskENTER_CRITICAL();
       g_vision_runtime.err_f += LINE_VISION_ERR_LPF_A * (err - g_vision_runtime.err_f);
       g_vision_runtime.quality = quality;
@@ -634,15 +707,6 @@ void StartVisionTask(void const * argument)
       }
       taskEXIT_CRITICAL();
 
-      if ((now_tick - last_print_tick) >= pdMS_TO_TICKS(100))
-      {
-        printf("VRAW x=%d y=%d err=%ld q=%d\r\n",
-               (int)latest.x,
-               (int)latest.y,
-               (long)(err * 1000.0f),
-               (int)quality);
-        last_print_tick = now_tick;
-      }
     }
   }
   /* USER CODE END StartVisionTask */
@@ -658,6 +722,12 @@ void StartVisionTask(void const * argument)
 void StartLogicTask(void const * argument)
 {
   /* USER CODE BEGIN StartLogicTask */
+  /*
+   * 逻辑任务（50ms）负责“做决定”，不负责底层闭环：
+   * - 收命令、切模式
+   * - 读取传感器快照
+   * - 根据模式生成目标速度（再交给 ControlTask 做速度环）
+   */
   uint8_t last_mode = g_ucMode;
   uint8_t cmd_char;// 串口/队列收到的指令字符
   SensorSnapshot snap; // 本周期使用的传感器快照
@@ -677,6 +747,10 @@ void StartLogicTask(void const * argument)
     lastTick = now;
 
     //确保数据传入完整函数
+    /*
+     * 双读快照确保拿到一份完整数据（与 SensorTask 的 seq 机制配套）。
+     * 这样逻辑任务不会读到“灰度是新数据、yaw 还是旧数据”的混合状态。
+     */
     SensorSnapshot snap1, snap2;
     do {
       snap1 = g_sensor_snapshot;
@@ -687,6 +761,7 @@ void StartLogicTask(void const * argument)
     //蓝牙按键控制
     if (xQueueReceive(CommandQueueHandle, &cmd_char, 0) == pdTRUE)
     {
+      /* 串口命令作为高优先级人工干预入口，收到后先标记为手动模式活跃。 */
       g_uart_manual_active = 1;
       switch(cmd_char)
         
@@ -717,6 +792,10 @@ void StartLogicTask(void const * argument)
  //切换模式清数据
     if (g_ucMode != last_mode)
     {
+      /*
+       * 模式切换时清所有控制器状态而不是只改 g_ucMode：
+       * 防止上一个模式残留的积分项/滤波状态带到新模式里造成突变。
+       */
       PID_Reset(&pidMotor1Speed);
       PID_Reset(&pidMotor2Speed);
       PID_Reset(&pid_pidHW_Tracking);
@@ -753,8 +832,13 @@ void StartLogicTask(void const * argument)
     // }
 
     //各模块功能
+    /*
+     * 各模式统一输出“目标速度”，真正 PWM 由 ControlTask 闭环计算。
+     * 这样模式逻辑和电机控制解耦，调试会清楚很多。
+     */
     switch (g_ucMode) {
       case 0:
+        /* 待机模式：如果当前没有串口手动控制，就保持停车。 */
         if (!g_uart_manual_active) {
           motorPidSetSpeed(0,0);
         }
@@ -763,6 +847,12 @@ void StartLogicTask(void const * argument)
       //循迹（未完成）
       case 1:
       {
+        /*
+         * 视觉巡线模式（状态机）：
+         * TRACK      有新鲜且质量足够的视觉数据，正常跟踪
+         * SEARCH     刚丢线但还有最近有效方向，按方向小幅搜索
+         * LOST_STOP  长时间无有效线，直接停车更安全
+         */
         TickType_t vision_age;
         TickType_t good_age;
         TickType_t vision_tick;
@@ -773,6 +863,7 @@ void StartLogicTask(void const * argument)
         int16_t vision_quality;
         int8_t vision_sign;
 
+        /* 先把视觉运行态拷到局部变量，后续判断就不用长时间占用临界区。 */
         taskENTER_CRITICAL();
         vision_err = g_vision_runtime.err_f;
         vision_quality = g_vision_runtime.quality;
@@ -815,6 +906,10 @@ void StartLogicTask(void const * argument)
 
         if (g_line_vision_state == LINE_VISION_TRACK)
         {
+          /*
+           * 有效跟踪时转弯越大，基础速度越低：
+           * 这样急弯时先降速，能减少冲出赛道/线路的概率。
+           */
           float track_state = vision_err * 3.0f; // keep close to old 4-sensor scale
           base_speed = g_line_base_speed - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
           if (base_speed < g_line_search_speed) base_speed = g_line_search_speed;
@@ -828,6 +923,7 @@ void StartLogicTask(void const * argument)
         }
         else if (g_line_vision_state == LINE_VISION_SEARCH)
         {
+          /* 丢线搜索时沿上次偏差方向原地偏转，避免左右来回抖动。 */
           float turn = LINE_VISION_SEARCH_TURN * (float)vision_sign;
           g_pid_out1 = g_line_search_speed + turn;
           g_pid_out2 = g_line_search_speed - turn;
@@ -837,6 +933,7 @@ void StartLogicTask(void const * argument)
         }
         else
         {
+          /* 长时间没有可靠视觉数据，直接停车，避免盲跑。 */
           g_pid_out = 0.0f;
           g_pid_out1 = 0.0f;
           g_pid_out2 = 0.0f;
@@ -850,6 +947,7 @@ void StartLogicTask(void const * argument)
 
         TickType_t  now = xTaskGetTickCount();
 
+        /* 距离足够时正常前进；过近时进入定时避障状态机。 */
         if(snap.dist > 20)
         {
           avoid_state = AVOID_IDLE;
@@ -859,12 +957,14 @@ void StartLogicTask(void const * argument)
         switch (avoid_state)
         {
           case AVOID_IDLE:
+            /* 先短暂停车，让车体稳定再开始后退。 */
             motorPidSetSpeed(0, 0);
             avoid_set_state(AVOID_BACK, 100); // 停车 100ms
             break;
 
           case AVOID_BACK:
             if (now >= avoid_deadline) {
+              /* 定时后退，拉开与障碍物距离。 */
               motorPidSetSpeed(-1.5f, -1.5f);
               avoid_set_state(AVOID_TURN, 300); // 后退 300ms
             }
@@ -872,6 +972,7 @@ void StartLogicTask(void const * argument)
 
           case AVOID_TURN:
             if (now >= avoid_deadline) {
+              /* 差速转向绕开障碍物。 */
               motorPidSetSpeed(2, -2);
               avoid_set_state(AVOID_PAUSE, 400); // 右转 400ms
             }
@@ -879,6 +980,7 @@ void StartLogicTask(void const * argument)
 
           case AVOID_PAUSE:
             if (now >= avoid_deadline) {
+              /* 结束动作后短暂停顿，再回到 IDLE。 */
               motorPidSetSpeed(0, 0);
               avoid_set_state(AVOID_IDLE, 200);
             }
@@ -888,11 +990,13 @@ void StartLogicTask(void const * argument)
 
     //跟随
       case 3:
+        /* 跟随模式：用超声距离 PID 输出前进/后退速度。 */
         if ((snap.sr04 > 0.0f) && (snap.sr04 < 60.0f))
         {
           g_follow_pid_out = PID_realize(&pidFollow, snap.sr04, dt);
 
 
+          /* 再做一道输出限幅，避免目标速度过大。 */
           if (g_follow_pid_out > 5) {
             g_follow_pid_out =5 ;
           }
@@ -909,13 +1013,19 @@ void StartLogicTask(void const * argument)
     //走直线
       case 4:
       {
+        /*
+         * 航向保持直行：
+         * 目标 yaw 与当前 yaw 做差，PID 只负责左右轮小幅差速修正。
+         */
         float speed_sync;
         float yaw_err = mpu6050Movement.target_val - snap.yaw;
+        /* 角度差归一化到 [-180,180]，避免跨 360/0 度时误差跳变。 */
         while (yaw_err > 180.0f) yaw_err -= 360.0f;
         while (yaw_err < -180.0f) yaw_err += 360.0f;
 
         if (fabsf(yaw_err) < 1.5f)
         {
+          /* 小误差死区：减少来回微调导致的电机抖动。 */
           g_fMPU6050YawMovePidOut = 0.0f;
         }
         else
@@ -969,6 +1079,12 @@ void StartLogicTask(void const * argument)
 void StartTask06(void const * argument)
 {
     /* USER CODE BEGIN StartTask06 */
+  /*
+   * 本地 OLED 参数菜单任务：
+   * - 短按：上下移动/数值加减
+   * - 长按：进入/确认 或 返回/取消
+   * - 编辑完成后只标记 settings dirty，由后台任务延迟保存到 Flash
+   */
   OLED_Init();
   OLED_Clear();
   // KEY1: Up/Enter, KEY2: Down/Back (short/long press).
@@ -998,6 +1114,7 @@ void StartTask06(void const * argument)
     uint8_t need_redraw = 0;
 
     //查看高低电平
+    /* 先采样按键电平，再交给去抖逻辑转换成短按/长按事件。 */
     uint8_t raw_up = (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_SET);
     uint8_t raw_down = (HAL_GPIO_ReadPin(KEY2_GPIO_Port, KEY2_Pin) == GPIO_PIN_RESET);
     ui_key_update(&key_up, raw_up, now, &up_evt);
@@ -1055,6 +1172,7 @@ void StartTask06(void const * argument)
             }
             else if (item->type == MENU_TYPE_PARAM)
             {
+              /* 进入编辑前先备份旧值，便于长按返回时撤销修改。 */
               view = UI_VIEW_EDIT;
               redraw_pending = 1;
               edit_index = (uint8_t)idx;
@@ -1143,6 +1261,7 @@ void StartTask06(void const * argument)
         }
         if (changed)
         {
+          /* 这里只打脏，不在 UI 任务里直接写 Flash，避免按键卡顿。 */
           settings_mark_dirty();
         }
         view = UI_VIEW_MENU;
@@ -1222,6 +1341,7 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
 //万能数据读写助手，UI 逻辑都统一按 32 位处理
 static float clampf(float v, float vmin, float vmax)
 {
+  /* 通用限幅工具：模式控制、UI 参数编辑都会用到。 */
   if (v < vmin) return vmin;
   if (v > vmax) return vmax;
   return v;
@@ -1229,6 +1349,7 @@ static float clampf(float v, float vmin, float vmax)
 
 static int32_t ui_get_int(const MenuItem *item)
 {
+  /* 把不同整数类型统一读成 int32，UI 逻辑层就不用分支处理类型。 */
   if (item == 0 || item->value_ptr == 0) return 0;
   if (item->value_type == MENU_VALUE_INT8) return *(int8_t *)item->value_ptr;
   if (item->value_type == MENU_VALUE_INT16) return *(int16_t *)item->value_ptr;
@@ -1237,6 +1358,7 @@ static int32_t ui_get_int(const MenuItem *item)
 }
 static void ui_set_int(const MenuItem *item, int32_t v)
 {
+  /* 与 ui_get_int 配套：UI 层统一操作 int32，再写回实际类型。 */
   if (item == 0 || item->value_ptr == 0) return;
   if (item->value_type == MENU_VALUE_INT8) *(int8_t *)item->value_ptr = (int8_t)v;
   else if (item->value_type == MENU_VALUE_INT16) *(int16_t *)item->value_ptr = (int16_t)v;
@@ -1246,6 +1368,12 @@ static void ui_set_int(const MenuItem *item, int32_t v)
 //将历史的放在k里，更新evt
 static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
 {
+  /*
+   * 按键状态机：
+   * - 先做去抖（电平稳定一段时间才确认）
+   * - 松手且未触发长按 -> short_press
+   * - 按住超过阈值 -> long_press（只触发一次）
+   */
   evt->short_press = 0;
   evt->long_press = 0;
 
@@ -1278,6 +1406,7 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
 
 static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
 {
+  /* 菜单显示层统一把值格式化成字符串，避免绘图函数关心数据类型。 */
   if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
   {
     snprintf(buf, len, "%.2f", *(float *)item->value_ptr);
@@ -1295,6 +1424,7 @@ static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
 //菜单层级搜索算法
 static uint8_t ui_menu_child_count(int8_t parent)
 {
+  /* 菜单是平铺数组 + parent 索引关系，这里按 parent 动态计算子项数。 */
   uint8_t count = 0;
   uint8_t i;
   for (i = 0; i < g_menu_count; i++)
@@ -1331,6 +1461,7 @@ static uint8_t ui_menu_child_pos(int8_t parent, uint8_t child_index)
 //绘图引擎
 static void ui_draw_line(uint8_t row, const char *text)
 {
+  /* OLED 每行固定宽度，先补空格再输出，防止短字符串残留旧字符。 */
   char buf[UI_LINE_CHARS + 1];
   uint8_t i = 0;
 
@@ -1345,6 +1476,7 @@ static void ui_draw_line(uint8_t row, const char *text)
 }
 static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uint8_t edit_mode, uint8_t edit_index)
 {
+  /* 菜单绘制同时兼容浏览态和编辑态：'>' 当前光标，'*' 当前编辑项。 */
   uint8_t count = ui_menu_child_count(parent);
   uint8_t line;
   int16_t cursor_idx = ui_menu_child_index(parent, cursor);
@@ -1395,6 +1527,7 @@ static void ui_draw_menu(int8_t parent, uint8_t cursor, uint8_t view_offset, uin
 }
 static void ui_draw_status(void)
 {
+  /* 状态页只展示关键运行量，刷新频率比菜单页更高。 */
   char line[32];
   snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
   ui_draw_line(0, line);

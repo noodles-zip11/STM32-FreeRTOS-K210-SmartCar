@@ -21,6 +21,11 @@ extern float g_line_min_speed;
 #define SETTINGS_COMMIT_MAGIC     0xA55AA55AUL
 #define SETTINGS_SAVE_DELAY_MS    2000U
 
+/*
+ * 真正需要保存到 Flash 的业务参数。
+ * 这里只放“可调参数”，不放运行时状态（积分项、瞬时速度等），
+ * 避免把无意义且变化很快的数据写进 Flash，缩短寿命。
+ */
 typedef struct
 {
   float m1_kp;
@@ -40,12 +45,15 @@ typedef struct
 
 typedef struct
 {
+  /* 记录头：用于识别、版本兼容和选择最新记录。 */
   uint32_t magic;
   uint16_t version;
   uint16_t payload_len;
   uint32_t seq;
   SettingsPayload payload;
+  /* crc32 覆盖从开头到 crc32 前一字节，用于校验整条记录是否完整。 */
   uint32_t crc32;
+  /* commit 单独作为“提交标志”，并且在写入流程里最后写。 */
   uint32_t commit;
 } SettingsRecord;
 
@@ -91,18 +99,21 @@ static uint32_t settings_crc32(const uint8_t *data, size_t len)
 
 static uint32_t flash_size_bytes(void)
 {
+  /* STM32F1 的 Flash 容量寄存器返回的是 KB，需要换算成字节。 */
   uint32_t flash_kb = (uint32_t)(*((uint16_t *)FLASH_SIZE_DATA_REGISTER));
   return flash_kb * 1024U;
 }
 
 static uint32_t settings_page_a_addr(void)
 {
+  /* 使用 Flash 最后一页的前一页作为 A 区，尽量不占主程序常用区域。 */
   uint32_t flash_end = FLASH_BASE + flash_size_bytes();
   return flash_end - (2U * FLASH_PAGE_SIZE);
 }
 
 static uint32_t settings_page_b_addr(void)
 {
+  /* 使用 Flash 最后一页作为 B 区，和 A 区轮换写入。 */
   uint32_t flash_end = FLASH_BASE + flash_size_bytes();
   return flash_end - FLASH_PAGE_SIZE;
 }
@@ -111,6 +122,12 @@ static uint8_t settings_record_is_valid(const SettingsRecord *rec)
 {
   uint32_t crc_calc;
 
+  /*
+   * 有效记录判断顺序：
+   * 1) 先检查魔数/版本/长度/提交标志（快）
+   * 2) 再算 CRC（慢一点）
+   * 这样可以减少不必要的 CRC 计算。
+   */
   if (rec == NULL) return 0U;
   if (rec->magic != SETTINGS_MAGIC) return 0U;
   if (rec->version != SETTINGS_VERSION) return 0U;
@@ -127,6 +144,7 @@ static void settings_capture_payload(SettingsPayload *p)
 {
   if (p == NULL) return;
 
+  /* 把当前运行中的参数快照出来，供写 Flash 使用。 */
   p->m1_kp = pidMotor1Speed.kp;
   p->m1_ki = pidMotor1Speed.ki;
   p->m1_kd = pidMotor1Speed.kd;
@@ -149,6 +167,10 @@ static void settings_apply_payload(SettingsPayload *p)
 {
   if (p == NULL) return;
 
+  /*
+   * 先做边界约束，再写回全局参数。
+   * 目的是防止旧版本数据/意外写坏数据把系统带到危险参数区间。
+   */
   p->m1_kp = clampf(p->m1_kp, -50.0f, 50.0f);
   p->m1_ki = clampf(p->m1_ki, -10.0f, 10.0f);
   p->m1_kd = clampf(p->m1_kd, -50.0f, 50.0f);
@@ -168,6 +190,7 @@ static void settings_apply_payload(SettingsPayload *p)
 
   if (p->line_min > p->line_max)
   {
+    /* 下限大于上限说明数据不合理，回退到一组安全默认值。 */
     p->line_min = 0.5f;
     p->line_max = 4.0f;
   }
@@ -197,6 +220,12 @@ static uint8_t settings_read_best_record(SettingsRecord *best, uint32_t *best_pa
   uint8_t a_ok = settings_record_is_valid(rec_a);
   uint8_t b_ok = settings_record_is_valid(rec_b);
 
+  /*
+   * 双页轮换策略：
+   * - 两页都无效：认为没有保存过；
+   * - 两页都有效：按 seq 选更新的那页。
+   * 这样即使写入过程中断电，也通常还能保留上一份有效记录。
+   */
   if (!a_ok && !b_ok)
   {
     return 0U;
@@ -224,6 +253,13 @@ static uint8_t settings_flash_write_record(uint32_t target_page, const SettingsR
   uint32_t i;
   uint32_t words_before_commit;
 
+  /*
+   * 写入策略的关键点：
+   * 1) 先擦页；
+   * 2) 先写除 commit 外的所有内容；
+   * 3) 最后写 commit 魔数。
+   * 这样断电时记录大概率会因为 commit 不完整而判定无效，不会误用半条数据。
+   */
   if (rec == NULL) return 0U;
   if (sizeof(SettingsRecord) > FLASH_PAGE_SIZE) return 0U;
 
@@ -282,6 +318,7 @@ bool settings_save_now(void)
   SettingsRecord rec;
   uint32_t target_page;
 
+  /* 生成一条完整记录，再写到“另一页”，避免覆盖当前有效页。 */
   rec.magic = SETTINGS_MAGIC;
   rec.version = SETTINGS_VERSION;
   rec.payload_len = sizeof(SettingsPayload);
@@ -304,6 +341,7 @@ bool settings_save_now(void)
     return false;
   }
 
+  /* 写成功后再切换活动页，保证 RAM 中状态和 Flash 一致。 */
   s_active_page = target_page;
   s_active_seq = rec.seq;
   s_has_active = 1U;
@@ -317,6 +355,7 @@ void settings_load(void)
 
   if (!settings_read_best_record(&rec, &page))
   {
+    /* 没有有效记录就保留编译时默认参数，不报错也能启动。 */
     s_has_active = 0U;
     s_active_page = 0U;
     s_active_seq = 0U;
@@ -331,6 +370,7 @@ void settings_load(void)
 
 void settings_mark_dirty(void)
 {
+  /* 只做“打脏标记 + 记录时间”，真正写 Flash 放到后台任务里。 */
   s_dirty = 1U;
   s_dirty_tick = HAL_GetTick();
 }
@@ -339,6 +379,11 @@ void settings_service(void)
 {
   uint32_t now;
 
+  /*
+   * 延迟保存的意义：
+   * - UI 连续调参时不会每次按键都擦写 Flash；
+   * - 降低磨损，也减少频繁写 Flash 带来的卡顿。
+   */
   if (s_dirty == 0U) return;
 
   now = HAL_GetTick();
@@ -353,6 +398,7 @@ void settings_service(void)
   }
   else
   {
+    /* 保存失败后延后重试，避免在错误状态下高频重复写入。 */
     s_dirty_tick = now;
   }
 }
