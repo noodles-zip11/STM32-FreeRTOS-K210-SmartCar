@@ -48,7 +48,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define UART3_CMD_ENABLE 1
+#define UART3_CMD_ENABLE 0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -151,7 +151,9 @@ int main(void)
 
   // --- 2. 串口与通信启动 ---
   // USART1 is used for debug TX only. Keep RX interrupt disabled to avoid IRQ storm.
+#if UART3_CMD_ENABLE
   HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
+#endif
   HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
 
   // --- 3. 算法参数初始化 ---
@@ -243,6 +245,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   // === 1. 蓝牙/遥控处理 (UART3) ===
   if (huart == &huart3)
   {
+#if UART3_CMD_ENABLE
     uint8_t cmd = g_ucusrtrecivedate;
     // Only allow expected control keys, shielding random serial noise.
     if (CommandQueueHandle != NULL &&
@@ -250,13 +253,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
          cmd == 'E' || cmd == 'F' || cmd == 'G' || cmd == 'H' ||
          cmd == 'I' || cmd == 'J' || cmd == 'K'))
     {
-#if UART3_CMD_ENABLE
       xQueueSendFromISR(CommandQueueHandle, &g_ucusrtrecivedate, &xHigherPriorityTaskWoken);
-#endif
     }
 
     // 继续接收
     HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
+ #endif
   }
   // === 2. 视觉数据处理 (UART2) ===
   else if (huart->Instance == USART2)
@@ -323,7 +325,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
+#if UART3_CMD_ENABLE
     (void)HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
+#endif
   }
 }
 

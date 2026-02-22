@@ -95,11 +95,6 @@ float g_pid_out2 = 0.0;
 #define LINE_VISION_ERR_LPF_A     0.30f
 #define LINE_VISION_SLOW_GAIN     0.80f
 #define LINE_VISION_SEARCH_TURN   0.60f
-#define LINE_VISION_DEBUG_UART1_EN 0
-#define LINE_VISION_DEBUG_MS      100U
-#define LINE_MODE1_PRINTF_EN      1
-#define LINE_MODE1_PRINTF_MS      100U
-
 //蓝牙接收
 uint8_t g_ucusrtrecivedate;
 
@@ -163,10 +158,11 @@ typedef struct {
   float err_f;
   int16_t quality;
   TickType_t tick;
+  TickType_t good_tick;
   int8_t sign;
 } VisionRuntime;
 
-static volatile VisionRuntime g_vision_runtime = {0.0f, 0, 0, 1};
+static volatile VisionRuntime g_vision_runtime = {0.0f, 0, 0, 0, 1};
 static LineVisionState g_line_vision_state = LINE_VISION_LOST_STOP;
 
 //准备队列静态内存和创建静态队列
@@ -443,12 +439,9 @@ void StartControlTask(void const * argument)
   static float m2_speed_f = 0.0f; // 电机2速度低通滤波后的值
   static float last_target_m1 = 0.0f;
   static float last_target_m2 = 0.0f;
+  /* Encoder direction signs are fixed by wiring/mechanics; adjust here if needed. */
   static int8_t m1_enc_sign = 1;
   static int8_t m2_enc_sign = -1;
-  static uint8_t m1_sign_checked = 0;
-  static uint8_t m2_sign_checked = 0;
-  static uint8_t m1_mismatch_streak = 0;
-  static uint8_t m2_mismatch_streak = 0;
 
 
 
@@ -503,51 +496,6 @@ void StartControlTask(void const * argument)
 
     Motor1Speed = (float)m1_enc_sign * raw_m1_speed;
     Motor2Speed = (float)m2_enc_sign * raw_m2_speed;
-
-    /* Auto-correct encoder sign once if measured speed opposes target direction. */
-    if (!m1_sign_checked &&
-        (fabsf(pidMotor1Speed.target_val) > 0.8f) &&
-        (fabsf(raw_m1_speed) > 0.1f))
-    {
-      uint8_t mismatch = ((pidMotor1Speed.target_val > 0.0f) && (Motor1Speed < -0.15f)) ||
-                         ((pidMotor1Speed.target_val < 0.0f) && (Motor1Speed > 0.15f));
-      if (mismatch)
-      {
-        if (++m1_mismatch_streak >= 15U)
-        {
-          m1_enc_sign = (int8_t)(-m1_enc_sign);
-          PID_Reset(&pidMotor1Speed);
-          m1_sign_checked = 1U;
-          m1_mismatch_streak = 0U;
-        }
-      }
-      else
-      {
-        m1_mismatch_streak = 0U;
-      }
-    }
-
-    if (!m2_sign_checked &&
-        (fabsf(pidMotor2Speed.target_val) > 0.8f) &&
-        (fabsf(raw_m2_speed) > 0.1f))
-    {
-      uint8_t mismatch = ((pidMotor2Speed.target_val > 0.0f) && (Motor2Speed < -0.15f)) ||
-                         ((pidMotor2Speed.target_val < 0.0f) && (Motor2Speed > 0.15f));
-      if (mismatch)
-      {
-        if (++m2_mismatch_streak >= 15U)
-        {
-          m2_enc_sign = (int8_t)(-m2_enc_sign);
-          PID_Reset(&pidMotor2Speed);
-          m2_sign_checked = 1U;
-          m2_mismatch_streak = 0U;
-        }
-      }
-      else
-      {
-        m2_mismatch_streak = 0U;
-      }
-    }
 
     m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
     m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
@@ -654,14 +602,13 @@ void StartVisionTask(void const * argument)
   /* USER CODE BEGIN StartVisionTask */
   VisionData_t data;
   VisionData_t latest;
-  TickType_t last_debug_tick = 0;
+  TickType_t last_print_tick = 0;
   /* Infinite loop */
   for(;;)
   {
     if (xQueueReceive(VisionQueueHandle, &latest, pdMS_TO_TICKS(20)) == pdTRUE)
     {
       float err;
-      float err_f;
       TickType_t now_tick;
       int16_t quality;
 
@@ -680,30 +627,22 @@ void StartVisionTask(void const * argument)
       g_vision_runtime.err_f += LINE_VISION_ERR_LPF_A * (err - g_vision_runtime.err_f);
       g_vision_runtime.quality = quality;
       g_vision_runtime.tick = now_tick;
-      g_vision_runtime.sign = (g_vision_runtime.err_f >= 0.0f) ? 1 : -1;
-      err_f = g_vision_runtime.err_f;
+      if (quality >= LINE_VISION_QUALITY_TH)
+      {
+        g_vision_runtime.good_tick = now_tick;
+        g_vision_runtime.sign = (g_vision_runtime.err_f >= 0.0f) ? 1 : -1;
+      }
       taskEXIT_CRITICAL();
 
-#if LINE_VISION_DEBUG_UART1_EN
-      if ((now_tick - last_debug_tick) >= pdMS_TO_TICKS(LINE_VISION_DEBUG_MS))
+      if ((now_tick - last_print_tick) >= pdMS_TO_TICKS(100))
       {
-        char msg[80];
-        int n = snprintf(
-          msg,
-          sizeof(msg),
-          "VRAW x=%d y=%d err=%ld q=%d\r\n",
-          (int)latest.x,
-          (int)latest.y,
-          (long)(err_f * 1000.0f),
-          (int)quality
-        );
-        if (n > 0)
-        {
-          HAL_UART_Transmit(&huart1, (uint8_t *)msg, (uint16_t)n, 20);
-        }
-        last_debug_tick = now_tick;
+        printf("VRAW x=%d y=%d err=%ld q=%d\r\n",
+               (int)latest.x,
+               (int)latest.y,
+               (long)(err * 1000.0f),
+               (int)quality);
+        last_print_tick = now_tick;
       }
-#endif
     }
   }
   /* USER CODE END StartVisionTask */
@@ -720,7 +659,6 @@ void StartLogicTask(void const * argument)
 {
   /* USER CODE BEGIN StartLogicTask */
   uint8_t last_mode = g_ucMode;
-  TickType_t last_mode1_printf_tick = 0;
   uint8_t cmd_char;// 串口/队列收到的指令字符
   SensorSnapshot snap; // 本周期使用的传感器快照
   TickType_t lastWakeTime = xTaskGetTickCount();// vTaskDelayUntil 的参考时间
@@ -795,6 +733,7 @@ void StartLogicTask(void const * argument)
       g_vision_runtime.err_f = 0.0f;
       g_vision_runtime.quality = 0;
       g_vision_runtime.tick = 0;
+      g_vision_runtime.good_tick = 0;
       g_vision_runtime.sign = 1;
       taskEXIT_CRITICAL();
       g_line_vision_state = LINE_VISION_LOST_STOP;
@@ -825,89 +764,75 @@ void StartLogicTask(void const * argument)
       case 1:
       {
         TickType_t vision_age;
+        TickType_t good_age;
         TickType_t vision_tick;
+        TickType_t vision_good_tick;
         TickType_t now_tick = xTaskGetTickCount();
         float vision_err;
         float base_speed;
-        float line_base;
-        float line_search;
-        float line_min;
-        float line_max;
         int16_t vision_quality;
         int8_t vision_sign;
-        float cmd_left = 0.0f;
-        float cmd_right = 0.0f;
-
-        /* Runtime guard for invalid line parameters loaded from flash. */
-        line_base = g_line_base_speed;
-        line_search = g_line_search_speed;
-        line_min = g_line_min_speed;
-        line_max = g_line_max_speed;
-        if (line_max < 0.3f) line_max = 4.0f;
-        if (line_search < 0.2f) line_search = 1.5f;
-        if (line_base < 0.2f) line_base = 2.0f;
-        if (line_min > line_max) line_min = 0.5f;
 
         taskENTER_CRITICAL();
         vision_err = g_vision_runtime.err_f;
         vision_quality = g_vision_runtime.quality;
         vision_tick = g_vision_runtime.tick;
+        vision_good_tick = g_vision_runtime.good_tick;
         vision_sign = g_vision_runtime.sign;
         taskEXIT_CRITICAL();
 
         if (vision_tick == 0)
         {
-          /* No frame received yet: keep searching instead of hard stop. */
           vision_age = pdMS_TO_TICKS(LINE_VISION_STOP_MS + 1U);
-          g_line_vision_state = LINE_VISION_SEARCH;
         }
         else
         {
           vision_age = now_tick - vision_tick;
-          /* K210 quality is scene-dependent; any non-zero fresh quality means line is detected. */
-          if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
-              (vision_quality > 0))
-          {
-            g_line_vision_state = LINE_VISION_TRACK;
-          }
-          else if (vision_age <= pdMS_TO_TICKS(LINE_VISION_STOP_MS))
-          {
-            g_line_vision_state = LINE_VISION_SEARCH;
-          }
-          else
-          {
-            g_line_vision_state = LINE_VISION_LOST_STOP;
-          }
+        }
+
+        if (vision_good_tick == 0)
+        {
+          good_age = pdMS_TO_TICKS(LINE_VISION_STOP_MS + 1U);
+        }
+        else
+        {
+          good_age = now_tick - vision_good_tick;
+        }
+
+        if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
+            (vision_quality >= LINE_VISION_QUALITY_TH))
+        {
+          g_line_vision_state = LINE_VISION_TRACK;
+        }
+        else if (good_age <= pdMS_TO_TICKS(LINE_VISION_STOP_MS))
+        {
+          g_line_vision_state = LINE_VISION_SEARCH;
+        }
+        else
+        {
+          g_line_vision_state = LINE_VISION_LOST_STOP;
         }
 
         if (g_line_vision_state == LINE_VISION_TRACK)
         {
           float track_state = vision_err * 3.0f; // keep close to old 4-sensor scale
-          base_speed = line_base - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
-          if (base_speed < line_search) base_speed = line_search;
+          base_speed = g_line_base_speed - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
+          if (base_speed < g_line_search_speed) base_speed = g_line_search_speed;
 
           g_pid_out = PID_realize(&pid_pidHW_Tracking, track_state, dt);
           g_pid_out1 = base_speed + g_pid_out;
           g_pid_out2 = base_speed - g_pid_out;
-          g_pid_out1 = clampf(g_pid_out1, line_min, line_max);
-          g_pid_out2 = clampf(g_pid_out2, line_min, line_max);
-          cmd_left = g_pid_out1;
-          cmd_right = g_pid_out2;
+          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
+          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else if (g_line_vision_state == LINE_VISION_SEARCH)
         {
-          if (fabsf(vision_err) > 0.03f)
-          {
-            vision_sign = (vision_err >= 0.0f) ? 1 : -1;
-          }
           float turn = LINE_VISION_SEARCH_TURN * (float)vision_sign;
-          g_pid_out1 = line_search + turn;
-          g_pid_out2 = line_search - turn;
-          g_pid_out1 = clampf(g_pid_out1, line_min, line_max);
-          g_pid_out2 = clampf(g_pid_out2, line_min, line_max);
-          cmd_left = g_pid_out1;
-          cmd_right = g_pid_out2;
+          g_pid_out1 = g_line_search_speed + turn;
+          g_pid_out2 = g_line_search_speed - turn;
+          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
+          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else
@@ -915,26 +840,8 @@ void StartLogicTask(void const * argument)
           g_pid_out = 0.0f;
           g_pid_out1 = 0.0f;
           g_pid_out2 = 0.0f;
-          cmd_left = 0.0f;
-          cmd_right = 0.0f;
           motorPidSetSpeed(0,0);
         }
-#if LINE_MODE1_PRINTF_EN
-        if ((now_tick - last_mode1_printf_tick) >= pdMS_TO_TICKS(LINE_MODE1_PRINTF_MS))
-        {
-          const char *state_str = "STOP";
-          if (g_line_vision_state == LINE_VISION_TRACK) state_str = "TRACK";
-          else if (g_line_vision_state == LINE_VISION_SEARCH) state_str = "SEARCH";
-          printf("LMODE,%s,L=%ld,R=%ld,ERR=%ld,Q=%d,AGE=%lu\r\n",
-                 state_str,
-                 (long)(cmd_left * 1000.0f),
-                 (long)(cmd_right * 1000.0f),
-                 (long)(vision_err * 1000.0f),
-                 (int)vision_quality,
-                 (unsigned long)(vision_age * portTICK_PERIOD_MS));
-          last_mode1_printf_tick = now_tick;
-        }
-#endif
         break;
       }
 
