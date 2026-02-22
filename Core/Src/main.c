@@ -68,27 +68,6 @@ extern volatile uint8_t g_ucMode;
 static uint8_t s_vision_rx_state = 0;
 static uint8_t s_vision_rx_data_cnt = 0;
 static uint8_t s_vision_rx_data_buf[4] = {0};
-
-/* Vision UART2 debug counters (read these in debugger Watches). */
-volatile uint32_t g_uart2_rx_irq_count = 0;
-volatile uint32_t g_vision_pkt_total = 0;
-volatile uint32_t g_vision_pkt_ok = 0;
-volatile uint32_t g_vision_pkt_bad = 0;
-volatile uint32_t g_vision_queue_null = 0;
-volatile uint32_t g_vision_queue_overwrite_fail = 0;
-volatile uint32_t g_vision_header_miss = 0;
-volatile uint8_t g_vision_rx_state_dbg = 0;
-volatile uint8_t g_vision_rx_last_byte = 0;
-volatile uint8_t g_vision_rx_last_sum = 0;
-volatile uint8_t g_vision_rx_last_calc_sum = 0;
-volatile int16_t g_vision_rx_last_x = 0;
-volatile int16_t g_vision_rx_last_y = 0;
-volatile uint32_t g_uart2_err_total = 0;
-volatile uint32_t g_uart2_err_ore = 0;
-volatile uint32_t g_uart2_err_fe = 0;
-volatile uint32_t g_uart2_err_ne = 0;
-volatile uint32_t g_uart2_err_pe = 0;
-volatile uint32_t g_uart2_recover_count = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -112,6 +91,13 @@ float Get_Distance_Filtered(void)
   last_valid = (0.7f * last_valid) + (0.3f * distance);
   osDelay(1);
   return last_valid;
+}
+
+int __io_putchar(int ch)
+{
+  uint8_t c = (uint8_t)ch;
+  (void)HAL_UART_Transmit(&huart1, &c, 1, 10);
+  return ch;
 }
 
 
@@ -277,14 +263,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
     uint8_t res = RxBuffer;
 
-    g_uart2_rx_irq_count++;
-    g_vision_rx_last_byte = res;
-
     if (s_vision_rx_state == 0U) {
       if (res == 0xFFU) {
         s_vision_rx_state = 1U;
-      } else {
-        g_vision_header_miss++;
       }
     }
     else if (s_vision_rx_state == 1U) {
@@ -295,7 +276,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         s_vision_rx_state = 1U;
       } else {
         s_vision_rx_state = 0U;
-        g_vision_header_miss++;
       }
     }
     else if (s_vision_rx_state == 2U) {
@@ -308,32 +288,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     else if (s_vision_rx_state == 3U) {
       uint8_t calc_sum = (s_vision_rx_data_buf[0] + s_vision_rx_data_buf[1] +
                           s_vision_rx_data_buf[2] + s_vision_rx_data_buf[3]) & 0xFF;
-      g_vision_pkt_total++;
-      g_vision_rx_last_sum = res;
-      g_vision_rx_last_calc_sum = calc_sum;
 
       if (res == calc_sum) {
         VisionData_t data;
         data.x = (int16_t)((s_vision_rx_data_buf[0] << 8) | s_vision_rx_data_buf[1]);
         data.y = (int16_t)((s_vision_rx_data_buf[2] << 8) | s_vision_rx_data_buf[3]);
-        g_vision_rx_last_x = data.x;
-        g_vision_rx_last_y = data.y;
-        g_vision_pkt_ok++;
-
         if (VisionQueueHandle != NULL) {
-          if (xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken) != pdPASS) {
-            g_vision_queue_overwrite_fail++;
-          }
-        } else {
-          g_vision_queue_null++;
+          xQueueOverwriteFromISR(VisionQueueHandle, &data, &xHigherPriorityTaskWoken);
         }
-      } else {
-        g_vision_pkt_bad++;
       }
       s_vision_rx_state = 0U;
     }
 
-    g_vision_rx_state_dbg = s_vision_rx_state;
     HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   }
   // 如果队列唤醒了高优先级任务，进行调度
@@ -344,22 +310,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART2)
   {
-    uint32_t err = huart->ErrorCode;
-    g_uart2_err_total++;
-    if ((err & HAL_UART_ERROR_ORE) != 0U) g_uart2_err_ore++;
-    if ((err & HAL_UART_ERROR_FE)  != 0U) g_uart2_err_fe++;
-    if ((err & HAL_UART_ERROR_NE)  != 0U) g_uart2_err_ne++;
-    if ((err & HAL_UART_ERROR_PE)  != 0U) g_uart2_err_pe++;
-
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
 
     s_vision_rx_state = 0U;
     s_vision_rx_data_cnt = 0U;
-    g_vision_rx_state_dbg = 0U;
     (void)HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
-    g_uart2_recover_count++;
   }
   else if (huart->Instance == USART3)
   {
