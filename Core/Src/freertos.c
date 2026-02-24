@@ -56,9 +56,9 @@
  * 巡线模式参数（同时也是 UI 可调参数，会被 settings 模块持久化）。
  * 放在全局是因为逻辑任务/UI/Flash 保存都会访问。
  */
-float g_line_base_speed = 2.0f;
-float g_line_search_speed = 1.5f;
-float g_line_max_speed = 4.0f;
+float g_line_base_speed = 1.2f;
+float g_line_search_speed = 0.8f;
+float g_line_max_speed = 2.0f;
 float g_line_min_speed = 0.5f;
 
 //电机测速和设置速度
@@ -98,13 +98,43 @@ int8_t g_laststate = 0;
 float g_pid_out = 0.0;
 float g_pid_out1 = 0.0;
 float g_pid_out2 = 0.0;
+float g_line_turn_cmd_f = 0.0f;
+uint8_t g_line_corner_active = 0U;
+float g_line_last_track_speed = 0.0f;
+float g_line_last_track_turn = 0.0f;
+TickType_t g_line_search_enter_tick = 0U;
+int8_t g_line_search_latched_sign = 1;
 
 #define LINE_VISION_FRESH_MS      150U
 #define LINE_VISION_STOP_MS       800U
 #define LINE_VISION_QUALITY_TH    350
-#define LINE_VISION_ERR_LPF_A     0.30f
-#define LINE_VISION_SLOW_GAIN     0.80f
-#define LINE_VISION_SEARCH_TURN   0.60f
+#define LINE_VISION_EDGE_TRACK_QUALITY_TH 140
+#define LINE_VISION_EDGE_TRACK_ERR_TH     0.55f
+#define LINE_VISION_ERR_LPF_A     0.15f
+#define LINE_VISION_CENTER_DEADBAND 0.05f
+#define LINE_VISION_TRACK_SCALE   1.2f
+#define LINE_VISION_SLOW_GAIN      0.80f
+#define LINE_VISION_SEARCH_TURN    0.25f
+#define LINE_VISION_TURN_SLOW_GAIN 0.60f
+#define LINE_VISION_TURN_CAP_ABS   0.32f
+#define LINE_VISION_TURN_CAP_RATIO 0.36f
+#define LINE_VISION_TURN_SLEW_STEP 0.05f
+/* 临时硬限速：巡线模式优先稳定性，其次才是速度。 */
+#define LINE_VISION_TRACK_WHEEL_MAX_CAP   1.15f
+#define LINE_VISION_SEARCH_SPEED_CAP      0.80f
+#define LINE_VISION_CORNER_ENTER_ERR      0.26f
+#define LINE_VISION_CORNER_EXIT_ERR       0.14f
+#define LINE_VISION_CORNER_INNER_MIN      0.0f
+#define LINE_VISION_CORNER_EXTRA_TURN_CAP 0.20f
+#define LINE_VISION_CORNER_EXTRA_TURN_RATIO 0.22f
+#define LINE_VISION_CORNER_EXTRA_SLEW     0.05f
+#define LINE_VISION_SEARCH_CORNER_TURN    0.48f
+#define LINE_VISION_SEARCH_KEEP_SPEED_MS   220U
+#define LINE_VISION_SEARCH_KEEP_TURN_TH    0.06f
+/* 临时保守 PID 预设（进入 Mode 1 巡线模式时应用）。 */
+#define LINE_VISION_FORCE_STABLE_PID_KP   (-1.2f)
+#define LINE_VISION_FORCE_STABLE_PID_KI   (0.0f)
+#define LINE_VISION_FORCE_STABLE_PID_KD   (0.0f)
 //蓝牙接收
 uint8_t g_ucusrtrecivedate;
 
@@ -354,7 +384,7 @@ static float clampf(float v, float vmin, float vmax);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
-/* GetIdleTaskMemory prototype (linked to static allocation support) */
+/* GetIdleTaskMemory 函数声明（用于 FreeRTOS 静态内存分配支持） */
 void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize );
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
@@ -489,7 +519,7 @@ void StartControlTask(void const * argument)
   static float m2_speed_f = 0.0f; // 电机2速度低通滤波后的值
   static float last_target_m1 = 0.0f;
   static float last_target_m2 = 0.0f;
-  /* Encoder direction signs are fixed by wiring/mechanics; adjust here if needed. */
+  /* 编码器方向符号由接线/机械安装决定；如有需要可在这里调整。 */
   static int8_t m1_enc_sign = 1;
   static int8_t m2_enc_sign = -1;
 
@@ -672,7 +702,7 @@ void StartVisionTask(void const * argument)
    * - 更新供逻辑任务使用的视觉运行态
    * 不在这里直接控车，避免视觉延迟影响整体调度。
    */
-  /* Start UART2 RX here so K210 traffic cannot flood main() init stage. */
+  /* 在这里启动 UART2 接收，避免 K210 数据在 main() 初始化阶段灌入。 */
   HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   /* Infinite loop */
   for(;;)
@@ -683,11 +713,12 @@ void StartVisionTask(void const * argument)
       TickType_t now_tick;
       int16_t quality;
 
-      // Queue length is 1, this loop is kept for compatibility if size changes later.
+      // 当前队列长度为 1；保留该循环是为了兼容后续可能调整队列长度。
       while (xQueueReceive(VisionQueueHandle, &data, 0) == pdTRUE) latest = data;
 
       /* 把视觉横向偏差缩放到较小范围，后面控制逻辑更容易调参。 */
-      err = (float)latest.x * 0.001f;
+      /* K210 的 x 符号方向与小车转向约定相反，这里统一取反一次。 */
+      err = -(float)latest.x * 0.001f;
       err = clampf(err, -1.0f, 1.0f);
 
       quality = latest.y;
@@ -700,7 +731,9 @@ void StartVisionTask(void const * argument)
       g_vision_runtime.err_f += LINE_VISION_ERR_LPF_A * (err - g_vision_runtime.err_f);
       g_vision_runtime.quality = quality;
       g_vision_runtime.tick = now_tick;
-      if (quality >= LINE_VISION_QUALITY_TH)
+      if ((quality >= LINE_VISION_QUALITY_TH) ||
+          ((quality >= LINE_VISION_EDGE_TRACK_QUALITY_TH) &&
+           (fabsf(g_vision_runtime.err_f) >= LINE_VISION_EDGE_TRACK_ERR_TH)))
       {
         g_vision_runtime.good_tick = now_tick;
         g_vision_runtime.sign = (g_vision_runtime.err_f >= 0.0f) ? 1 : -1;
@@ -723,7 +756,7 @@ void StartLogicTask(void const * argument)
 {
   /* USER CODE BEGIN StartLogicTask */
   /*
-   * 逻辑任务（50ms）负责“做决定”，不负责底层闭环：
+   * 逻辑任务（20ms）负责“做决定”，不负责底层闭环：
    * - 收命令、切模式
    * - 读取传感器快照
    * - 根据模式生成目标速度（再交给 ControlTask 做速度环）
@@ -804,6 +837,12 @@ void StartLogicTask(void const * argument)
       g_pid_out = 0.0f;
       g_pid_out1 = 0.0f;
       g_pid_out2 = 0.0f;
+      g_line_turn_cmd_f = 0.0f;
+      g_line_corner_active = 0U;
+      g_line_last_track_speed = 0.0f;
+      g_line_last_track_turn = 0.0f;
+      g_line_search_enter_tick = 0U;
+      g_line_search_latched_sign = 1;
       g_follow_pid_out = 0.0f;
       g_fMPU6050YawMovePidOut = 0.0f;
       g_fMPU6050YawMovePidOut1 = 0.0f;
@@ -817,7 +856,13 @@ void StartLogicTask(void const * argument)
       taskEXIT_CRITICAL();
       g_line_vision_state = LINE_VISION_LOST_STOP;
       avoid_state = AVOID_IDLE;
-      if (g_ucMode == 4)
+      if (g_ucMode == 1)
+      {
+        pid_pidHW_Tracking.kp = LINE_VISION_FORCE_STABLE_PID_KP;
+        pid_pidHW_Tracking.ki = LINE_VISION_FORCE_STABLE_PID_KI;
+        pid_pidHW_Tracking.kd = LINE_VISION_FORCE_STABLE_PID_KD;
+      }
+      else if (g_ucMode == 4)
       {
         mpu6050Movement.target_val = snap.yaw;
       }
@@ -858,6 +903,7 @@ void StartLogicTask(void const * argument)
         TickType_t vision_tick;
         TickType_t vision_good_tick;
         TickType_t now_tick = xTaskGetTickCount();
+        uint8_t prev_line_vision_state = g_line_vision_state;
         float vision_err;
         float base_speed;
         int16_t vision_quality;
@@ -891,7 +937,9 @@ void StartLogicTask(void const * argument)
         }
 
         if ((vision_age <= pdMS_TO_TICKS(LINE_VISION_FRESH_MS)) &&
-            (vision_quality >= LINE_VISION_QUALITY_TH))
+            ((vision_quality >= LINE_VISION_QUALITY_TH) ||
+             ((vision_quality >= LINE_VISION_EDGE_TRACK_QUALITY_TH) &&
+              (fabsf(vision_err) >= LINE_VISION_EDGE_TRACK_ERR_TH))))
         {
           g_line_vision_state = LINE_VISION_TRACK;
         }
@@ -904,31 +952,134 @@ void StartLogicTask(void const * argument)
           g_line_vision_state = LINE_VISION_LOST_STOP;
         }
 
+        if ((g_line_vision_state == LINE_VISION_SEARCH) && (prev_line_vision_state != LINE_VISION_SEARCH))
+        {
+          g_line_search_enter_tick = now_tick;
+          if (vision_sign != 0) g_line_search_latched_sign = vision_sign;
+        }
+        else if (g_line_vision_state == LINE_VISION_TRACK)
+        {
+          if (vision_sign != 0) g_line_search_latched_sign = vision_sign;
+        }
+
         if (g_line_vision_state == LINE_VISION_TRACK)
         {
           /*
            * 有效跟踪时转弯越大，基础速度越低：
            * 这样急弯时先降速，能减少冲出赛道/线路的概率。
            */
-          float track_state = vision_err * 3.0f; // keep close to old 4-sensor scale
+          float line_wheel_max = fminf(g_line_max_speed, LINE_VISION_TRACK_WHEEL_MAX_CAP);
+          float line_search_floor;
+          float err_mag;
+          float track_output_min;
+          if (line_wheel_max < g_line_min_speed) line_wheel_max = g_line_min_speed;
+
+          float track_state;
+          if (fabsf(vision_err) < LINE_VISION_CENTER_DEADBAND) vision_err = 0.0f;
+          err_mag = fabsf(vision_err);
+          if (!g_line_corner_active && (err_mag >= LINE_VISION_CORNER_ENTER_ERR))
+          {
+            g_line_corner_active = 1U;
+          }
+          else if (g_line_corner_active && (err_mag <= LINE_VISION_CORNER_EXIT_ERR))
+          {
+            g_line_corner_active = 0U;
+          }
+          track_output_min = g_line_corner_active ? LINE_VISION_CORNER_INNER_MIN : g_line_min_speed;
+          if (track_output_min < 0.0f) track_output_min = 0.0f;
+          line_search_floor = g_line_corner_active ? fminf(0.35f, line_wheel_max) : g_line_min_speed;
+          if (line_search_floor < track_output_min) line_search_floor = track_output_min;
+          {
+            float track_gain = LINE_VISION_TRACK_SCALE + 1.2f * err_mag;
+            if (g_line_corner_active) track_gain += 0.35f;
+            if (track_gain > 2.2f) track_gain = 2.2f;
+            track_state = vision_err * track_gain;
+          }
           base_speed = g_line_base_speed - LINE_VISION_SLOW_GAIN * fabsf(vision_err);
-          if (base_speed < g_line_search_speed) base_speed = g_line_search_speed;
+          if (base_speed > line_wheel_max) base_speed = line_wheel_max;
+          if (base_speed < line_search_floor) base_speed = line_search_floor;
 
           g_pid_out = PID_realize(&pid_pidHW_Tracking, track_state, dt);
+          {
+            float turn_cap = LINE_VISION_TURN_CAP_ABS + 0.25f * err_mag;
+            float turn_cap_ratio = base_speed * (LINE_VISION_TURN_CAP_RATIO + 0.25f * err_mag);
+            float turn_cap_by_min = base_speed - track_output_min;
+            if (g_line_corner_active)
+            {
+              turn_cap += LINE_VISION_CORNER_EXTRA_TURN_CAP;
+              turn_cap_ratio = base_speed * (LINE_VISION_TURN_CAP_RATIO + LINE_VISION_CORNER_EXTRA_TURN_RATIO + 0.25f * err_mag);
+            }
+            if (turn_cap_ratio < turn_cap) turn_cap = turn_cap_ratio;
+            if (turn_cap_by_min < turn_cap) turn_cap = turn_cap_by_min;
+            if (turn_cap < 0.0f) turn_cap = 0.0f;
+            g_pid_out = clampf(g_pid_out, -turn_cap, turn_cap);
+          }
+          {
+            float delta_turn = g_pid_out - g_line_turn_cmd_f;
+            float turn_slew_step = LINE_VISION_TURN_SLEW_STEP + 0.06f * fabsf(vision_err);
+            if (g_line_corner_active) turn_slew_step += LINE_VISION_CORNER_EXTRA_SLEW;
+            if (turn_slew_step > 0.10f) turn_slew_step = 0.10f;
+            if (delta_turn > turn_slew_step) delta_turn = turn_slew_step;
+            if (delta_turn < -turn_slew_step) delta_turn = -turn_slew_step;
+            g_line_turn_cmd_f += delta_turn;
+            g_pid_out = g_line_turn_cmd_f;
+          }
+          base_speed -= LINE_VISION_TURN_SLOW_GAIN * fabsf(g_pid_out);
+          if (base_speed > line_wheel_max) base_speed = line_wheel_max;
+          if (base_speed < line_search_floor) base_speed = line_search_floor;
           g_pid_out1 = base_speed + g_pid_out;
           g_pid_out2 = base_speed - g_pid_out;
-          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
-          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          g_pid_out1 = clampf(g_pid_out1, track_output_min, line_wheel_max);
+          g_pid_out2 = clampf(g_pid_out2, track_output_min, line_wheel_max);
+          g_line_last_track_speed = base_speed;
+          g_line_last_track_turn = g_pid_out;
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else if (g_line_vision_state == LINE_VISION_SEARCH)
         {
           /* 丢线搜索时沿上次偏差方向原地偏转，避免左右来回抖动。 */
-          float turn = LINE_VISION_SEARCH_TURN * (float)vision_sign;
-          g_pid_out1 = g_line_search_speed + turn;
-          g_pid_out2 = g_line_search_speed - turn;
-          g_pid_out1 = clampf(g_pid_out1, g_line_min_speed, g_line_max_speed);
-          g_pid_out2 = clampf(g_pid_out2, g_line_min_speed, g_line_max_speed);
+          TickType_t search_elapsed = now_tick - g_line_search_enter_tick;
+          uint8_t keep_turn_speed = 0U;
+          float search_speed = fminf(g_line_search_speed, LINE_VISION_SEARCH_SPEED_CAP);
+          float line_wheel_max = fminf(g_line_max_speed, LINE_VISION_TRACK_WHEEL_MAX_CAP);
+          float search_output_min = g_line_corner_active ? LINE_VISION_CORNER_INNER_MIN : g_line_min_speed;
+          int8_t search_sign = g_line_search_latched_sign;
+          float turn = (g_line_corner_active ? LINE_VISION_SEARCH_CORNER_TURN : LINE_VISION_SEARCH_TURN) * (float)search_sign;
+          if ((search_elapsed <= pdMS_TO_TICKS(LINE_VISION_SEARCH_KEEP_SPEED_MS)) &&
+              (g_line_corner_active || (fabsf(g_line_last_track_turn) >= LINE_VISION_SEARCH_KEEP_TURN_TH)))
+          {
+            keep_turn_speed = 1U;
+          }
+          if (search_output_min < 0.0f) search_output_min = 0.0f;
+          if (line_wheel_max < g_line_min_speed) line_wheel_max = g_line_min_speed;
+          if (keep_turn_speed)
+          {
+            if (g_line_last_track_speed > search_speed) search_speed = g_line_last_track_speed;
+            {
+              float keep_turn = fabsf(g_line_last_track_turn);
+              if (keep_turn > fabsf(turn))
+              {
+                turn = keep_turn * (float)search_sign;
+              }
+            }
+          }
+          if (search_speed < search_output_min) search_speed = search_output_min;
+          if (search_speed > line_wheel_max) search_speed = line_wheel_max;
+          float turn_cap = search_speed - search_output_min;
+          if (turn_cap < 0.0f) turn_cap = 0.0f;
+          turn = clampf(turn, -turn_cap, turn_cap);
+          {
+            float delta_turn = turn - g_line_turn_cmd_f;
+            float search_slew = LINE_VISION_TURN_SLEW_STEP + (g_line_corner_active ? LINE_VISION_CORNER_EXTRA_SLEW : 0.0f);
+            if (delta_turn > search_slew) delta_turn = search_slew;
+            if (delta_turn < -search_slew) delta_turn = -search_slew;
+            g_line_turn_cmd_f += delta_turn;
+            turn = g_line_turn_cmd_f;
+          }
+          g_pid_out1 = search_speed + turn;
+          g_pid_out2 = search_speed - turn;
+          g_pid_out1 = clampf(g_pid_out1, search_output_min, line_wheel_max);
+          g_pid_out2 = clampf(g_pid_out2, search_output_min, line_wheel_max);
           motorPidSetSpeed(g_pid_out1, g_pid_out2);
         }
         else
@@ -937,6 +1088,11 @@ void StartLogicTask(void const * argument)
           g_pid_out = 0.0f;
           g_pid_out1 = 0.0f;
           g_pid_out2 = 0.0f;
+          g_line_turn_cmd_f = 0.0f;
+          g_line_corner_active = 0U;
+          g_line_last_track_speed = 0.0f;
+          g_line_last_track_turn = 0.0f;
+          g_line_search_enter_tick = 0U;
           motorPidSetSpeed(0,0);
         }
         break;
@@ -1063,7 +1219,7 @@ void StartLogicTask(void const * argument)
         break;
     }
     //绝对延时
-    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(50));
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(20));
   }
   /* USER CODE END StartLogicTask */
 }
@@ -1087,7 +1243,7 @@ void StartTask06(void const * argument)
    */
   OLED_Init();
   OLED_Clear();
-  // KEY1: Up/Enter, KEY2: Down/Back (short/long press).
+  // KEY1：上/确认，KEY2：下/返回（支持短按/长按）。
   //按键状态
   KeyState key_up = {0};
   KeyState key_down = {0};

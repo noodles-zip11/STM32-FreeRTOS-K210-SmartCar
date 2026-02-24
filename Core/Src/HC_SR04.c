@@ -1,6 +1,6 @@
 //
-// Created by miyeon on 2025/12/5.
-//
+// HC-SR04 超声波测距模块驱动
+// 创建者：miyeon（2025/12/5）
 //
 
 #include "main.h"
