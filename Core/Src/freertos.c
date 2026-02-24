@@ -858,9 +858,7 @@ void StartLogicTask(void const * argument)
       avoid_state = AVOID_IDLE;
       if (g_ucMode == 1)
       {
-        pid_pidHW_Tracking.kp = LINE_VISION_FORCE_STABLE_PID_KP;
-        pid_pidHW_Tracking.ki = LINE_VISION_FORCE_STABLE_PID_KI;
-        pid_pidHW_Tracking.kd = LINE_VISION_FORCE_STABLE_PID_KD;
+        /* 不在模式切换时强制覆盖循迹 PID，保留用户菜单调参与 Flash 恢复结果。 */
       }
       else if (g_ucMode == 4)
       {
@@ -1013,16 +1011,21 @@ void StartLogicTask(void const * argument)
             if (turn_cap_by_min < turn_cap) turn_cap = turn_cap_by_min;
             if (turn_cap < 0.0f) turn_cap = 0.0f;
             g_pid_out = clampf(g_pid_out, -turn_cap, turn_cap);
-          }
-          {
-            float delta_turn = g_pid_out - g_line_turn_cmd_f;
-            float turn_slew_step = LINE_VISION_TURN_SLEW_STEP + 0.06f * fabsf(vision_err);
-            if (g_line_corner_active) turn_slew_step += LINE_VISION_CORNER_EXTRA_SLEW;
-            if (turn_slew_step > 0.10f) turn_slew_step = 0.10f;
-            if (delta_turn > turn_slew_step) delta_turn = turn_slew_step;
-            if (delta_turn < -turn_slew_step) delta_turn = -turn_slew_step;
-            g_line_turn_cmd_f += delta_turn;
-            g_pid_out = g_line_turn_cmd_f;
+            {
+              float delta_turn = g_pid_out - g_line_turn_cmd_f;
+              float turn_slew_step = LINE_VISION_TURN_SLEW_STEP + 0.06f * fabsf(vision_err);
+              if (g_line_corner_active) turn_slew_step += LINE_VISION_CORNER_EXTRA_SLEW;
+              if (turn_slew_step > 0.10f) turn_slew_step = 0.10f;
+              if (delta_turn > turn_slew_step) delta_turn = turn_slew_step;
+              if (delta_turn < -turn_slew_step) delta_turn = -turn_slew_step;
+              g_line_turn_cmd_f += delta_turn;
+              /*
+               * 斜坡限速后 turn_cmd 可能仍保留上一周期的大转向量（例如刚出弯）。
+               * 这里再次按当前周期 turn_cap 限幅，并同步夹紧内部状态，避免绕过转向上限。
+               */
+              g_line_turn_cmd_f = clampf(g_line_turn_cmd_f, -turn_cap, turn_cap);
+              g_pid_out = g_line_turn_cmd_f;
+            }
           }
           base_speed -= LINE_VISION_TURN_SLOW_GAIN * fabsf(g_pid_out);
           if (base_speed > line_wheel_max) base_speed = line_wheel_max;
@@ -1074,6 +1077,11 @@ void StartLogicTask(void const * argument)
             if (delta_turn > search_slew) delta_turn = search_slew;
             if (delta_turn < -search_slew) delta_turn = -search_slew;
             g_line_turn_cmd_f += delta_turn;
+            /*
+             * 与 TRACK 同理：SEARCH 在斜坡后也要再按 turn_cap 限幅，
+             * 否则从大转向状态切入 SEARCH 时会短时超过当前搜索转向上限。
+             */
+            g_line_turn_cmd_f = clampf(g_line_turn_cmd_f, -turn_cap, turn_cap);
             turn = g_line_turn_cmd_f;
           }
           g_pid_out1 = search_speed + turn;
