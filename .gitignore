@@ -1,0 +1,47 @@
+# OS / Explorer
+Thumbs.db
+Desktop.ini
+
+# IDE / Editor
+.idea/
+.vscode/
+AGENTS.md
+
+# CMake / Ninja build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+cmake_install.cmake
+install_manifest.txt
+*.ninja
+.ninja_deps
+.ninja_log
+
+# STM32 / GCC build artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.list
+*.o
+*.obj
+*.d
+*.su
+*.a
+*.srec
+
+# Python cache (for local K210 script editing/testing)
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+
+# Optional local media (uncomment if you don't want to upload demo videos)
+# *.mp4
