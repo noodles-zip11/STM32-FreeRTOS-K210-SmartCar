@@ -246,7 +246,8 @@ static StackType_t xStartUITaskStack[384];
 /* USER CODE BEGIN PM */
 //ui菜单
 #define UI_LIST_LINES 4
-#define UI_LINE_CHARS 21
+/* 128px OLED + 8px fixed-width font -> one row safely fits 16 chars. */
+#define UI_LINE_CHARS 16
 #define UI_KEY_DEBOUNCE_MS 5
 #define UI_KEY_LONG_MS 350
 #define UI_MENU_REFRESH_MS 200
@@ -363,6 +364,7 @@ void StartTask06(void const * argument);
 static int32_t ui_get_int(const MenuItem *item);
 static void ui_set_int(const MenuItem *item, int32_t v);
 static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt);
+static void ui_format_float_fixed(float v, uint8_t decimals, char *buf, uint8_t len);
 static void ui_format_value(const MenuItem *item, char *buf, uint8_t len);
 static uint8_t ui_menu_child_count(int8_t parent);
 static int16_t ui_menu_child_index(int8_t parent, uint8_t child_pos);
@@ -1567,13 +1569,60 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
   }
 }
 
+static void ui_format_float_fixed(float v, uint8_t decimals, char *buf, uint8_t len)
+{
+  uint32_t scale = 1U;
+  uint8_t i;
+  uint8_t neg;
+  float abs_v;
+  uint32_t scaled;
+  uint32_t ipart;
+  uint32_t fpart;
+
+  if (buf == NULL || len == 0U) return;
+
+  if (!isfinite(v))
+  {
+    snprintf(buf, len, "nan");
+    return;
+  }
+
+  if (decimals > 3U) decimals = 3U;
+  for (i = 0; i < decimals; i++) scale *= 10U;
+
+  neg = (v < 0.0f) ? 1U : 0U;
+  abs_v = neg ? (-v) : v;
+
+  if (abs_v > 99999.0f)
+  {
+    snprintf(buf, len, neg ? "-ovf" : "ovf");
+    return;
+  }
+
+  scaled = (uint32_t)(abs_v * (float)scale + 0.5f);
+  ipart = (scale > 0U) ? (scaled / scale) : scaled;
+  fpart = (scale > 0U) ? (scaled % scale) : 0U;
+
+  if (decimals == 0U)
+  {
+    snprintf(buf, len, "%s%lu", neg ? "-" : "", (unsigned long)ipart);
+  }
+  else
+  {
+    snprintf(buf, len, "%s%lu.%0*lu",
+             neg ? "-" : "",
+             (unsigned long)ipart,
+             (int)decimals,
+             (unsigned long)fpart);
+  }
+}
 
 static void ui_format_value(const MenuItem *item, char *buf, uint8_t len)
 {
   /* 菜单显示层统一把值格式化成字符串，避免绘图函数关心数据类型。 */
   if (item->value_type == MENU_VALUE_FLOAT && item->value_ptr)
   {
-    snprintf(buf, len, "%.2f", *(float *)item->value_ptr);
+    ui_format_float_fixed(*(float *)item->value_ptr, 2U, buf, len);
   }
   else if (item->value_type != MENU_VALUE_NONE)
   {
@@ -1693,13 +1742,24 @@ static void ui_draw_status(void)
 {
   /* 状态页只展示关键运行量，刷新频率比菜单页更高。 */
   char line[32];
+  char lbuf[12];
+  char rbuf[12];
+  char dbuf[12];
+  char mbuf[12];
+  char ybuf[12];
+
+  ui_format_float_fixed(Motor1Speed, 1U, lbuf, sizeof(lbuf));
+  ui_format_float_fixed(Motor2Speed, 1U, rbuf, sizeof(rbuf));
+  ui_format_float_fixed(dist, 1U, dbuf, sizeof(dbuf));
+  ui_format_float_fixed(mile, 1U, mbuf, sizeof(mbuf));
+  ui_format_float_fixed(yaw, 1U, ybuf, sizeof(ybuf));
   snprintf(line, sizeof(line), "Mode:%d", g_ucMode);
   ui_draw_line(0, line);
-  snprintf(line, sizeof(line), "L:%.1f R:%.1f", Motor1Speed, Motor2Speed);
+  snprintf(line, sizeof(line), "L:%s R:%s", lbuf, rbuf);
   ui_draw_line(1, line);
-  snprintf(line, sizeof(line), "D:%.1f M:%.1f", dist, mile);
+  snprintf(line, sizeof(line), "D:%s M:%s", dbuf, mbuf);
   ui_draw_line(2, line);
-  snprintf(line, sizeof(line), "Yaw:%.1f", yaw);
+  snprintf(line, sizeof(line), "Yaw:%s", ybuf);
   ui_draw_line(3, line);
 }
 
