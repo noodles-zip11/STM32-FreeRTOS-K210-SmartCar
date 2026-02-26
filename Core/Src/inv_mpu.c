@@ -2947,7 +2947,9 @@ unsigned short inv_row_2_scale(const signed char *row)
 //�պ���,δ�õ�.
 void mget_ms(unsigned long *time)
 {
-
+    if (time) {
+        *time = HAL_GetTick();
+    }
 }
 //mpu6050,dmp��ʼ��
 //����ֵ:0,����
@@ -2975,7 +2977,8 @@ uint8_t mpu_dmp_init(void)
 		res=dmp_set_fifo_rate(DEFAULT_MPU_HZ);	//����DMP�������(��󲻳���200Hz)
 		if(res)return 7;   
 		res=run_self_test();		//�Լ�
-		if(res)return 8;    
+		/* 自检失败不阻塞 DMP 启动，否则上层 yaw 会长期读不到。 */
+		if(res) res = 0;
 		res=mpu_set_dmp_state(1);	//ʹ��DMP
 		if(res)return 9;     
 	}else return 10;

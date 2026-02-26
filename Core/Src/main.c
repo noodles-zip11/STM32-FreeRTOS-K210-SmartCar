@@ -194,7 +194,14 @@ int main(void)
   /* IMU 初始化前延时一小段时间，给上电和传感器内部稳态一点缓冲。 */
   HAL_Delay(500); // 等待上电稳定
   MPU_Init();     // 初始化MPU6050
-  mpu_dmp_init();
+  for (uint8_t imu_retry = 0; imu_retry < 3; imu_retry++)
+  {
+    if (mpu_dmp_init() == 0)
+    {
+      break;
+    }
+    HAL_Delay(100);
+  }
 
   /* USER CODE END 2 */
 

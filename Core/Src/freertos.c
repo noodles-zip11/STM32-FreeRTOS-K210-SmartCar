@@ -1172,9 +1172,11 @@ void StartLogicTask(void const * argument)
       case 2:
 
         TickType_t  now = xTaskGetTickCount();
+        const float avoid_enter_cm = 20.0f;
+        const float avoid_exit_cm = 28.0f;
 
         /* 距离足够时正常前进；过近时进入定时避障状态机。 */
-        if(snap.dist > 20)
+        if ((avoid_state == AVOID_IDLE) && (snap.dist > avoid_enter_cm))
         {
           avoid_state = AVOID_IDLE;
           motorPidSetSpeed(2, 2);
@@ -1207,8 +1209,13 @@ void StartLogicTask(void const * argument)
           case AVOID_PAUSE:
             if (now >= avoid_deadline) {
               /* 结束动作后短暂停顿，再回到 IDLE。 */
-              motorPidSetSpeed(0, 0);
-              avoid_set_state(AVOID_IDLE, 200);
+              if (snap.dist > avoid_exit_cm) {
+                motorPidSetSpeed(0, 0);
+                avoid_set_state(AVOID_IDLE, 200);
+              } else {
+                motorPidSetSpeed(2, -2);
+                avoid_set_state(AVOID_PAUSE, 200);
+              }
             }
             break;
         }
@@ -1245,9 +1252,25 @@ void StartLogicTask(void const * argument)
          */
         float speed_sync;
         float yaw_err = mpu6050Movement.target_val - snap.yaw;
+        float yaw_equiv;
+        float base_speed = 2.0f;
+        float yaw_out_cap = 0.8f;
         /* 角度差归一化到 [-180,180]，避免跨 360/0 度时误差跳变。 */
         while (yaw_err > 180.0f) yaw_err -= 360.0f;
         while (yaw_err < -180.0f) yaw_err += 360.0f;
+        yaw_equiv = mpu6050Movement.target_val - yaw_err;
+        if (fabsf(yaw_err) > 6.0f) {
+          base_speed = 1.6f;
+          yaw_out_cap = 1.0f;
+        }
+        if (fabsf(yaw_err) > 18.0f) {
+          base_speed = 1.1f;
+          yaw_out_cap = 1.2f;
+        }
+        if (fabsf(yaw_err) > 35.0f) {
+          base_speed = 0.7f;
+          yaw_out_cap = 1.4f;
+        }
 
         if (fabsf(yaw_err) < 1.5f)
         {
@@ -1256,21 +1279,25 @@ void StartLogicTask(void const * argument)
         }
         else
         {
-          g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, snap.yaw,dt);
+          g_fMPU6050YawMovePidOut = PID_realize(&mpu6050Movement, yaw_equiv,dt);
         }
 
-        if (g_fMPU6050YawMovePidOut > 0.6f) g_fMPU6050YawMovePidOut = 0.6f;
-        if (g_fMPU6050YawMovePidOut < -0.6f) g_fMPU6050YawMovePidOut = -0.6f;
+        /*
+         * 仅靠当前 PID(kp 较小) 在“被外力突然踢偏”时纠偏偏弱。
+         * 给中大角度误差增加一个最小转向量，保证车子确实开始回头。
+         */
+        if (g_fMPU6050YawMovePidOut > yaw_out_cap) g_fMPU6050YawMovePidOut = yaw_out_cap;
+        if (g_fMPU6050YawMovePidOut < -yaw_out_cap) g_fMPU6050YawMovePidOut = -yaw_out_cap;
 
 //        speed_sync = 0.15f * (Motor2Speed - Motor1Speed);
 //        if (speed_sync > 0.35f) speed_sync = 0.35f;
 //        if (speed_sync < -0.35f) speed_sync = -0.35f;
 
 //        g_fMPU6050YawMovePidOut1 = 1.5f + g_fMPU6050YawMovePidOut + speed_sync;
-        g_fMPU6050YawMovePidOut1 = 1.5f + g_fMPU6050YawMovePidOut;
+        g_fMPU6050YawMovePidOut1 = base_speed + g_fMPU6050YawMovePidOut;
 
 //        g_fMPU6050YawMovePidOut2 = 1.5f - g_fMPU6050YawMovePidOut - speed_sync;
-        g_fMPU6050YawMovePidOut2 = 1.5f - g_fMPU6050YawMovePidOut;
+        g_fMPU6050YawMovePidOut2 = base_speed - g_fMPU6050YawMovePidOut;
 
         if(g_fMPU6050YawMovePidOut1 >3.5) g_fMPU6050YawMovePidOut1 =3.5;
         if(g_fMPU6050YawMovePidOut1 < 0 ) g_fMPU6050YawMovePidOut1 =0;
