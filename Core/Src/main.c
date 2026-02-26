@@ -48,6 +48,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* 串口3命令接收开关：调试阶段可临时关闭，便于隔离串口干扰问题。 */
 #define UART3_CMD_ENABLE 1
 /* USER CODE END PD */
 
@@ -64,7 +65,12 @@ extern uint8_t  RxBuffer;
 extern volatile TickType_t g_last_cmd_tick;
 extern volatile uint8_t g_ucMode;
 
-/* Vision UART2 parser state (file-scope so ErrorCallback can reset it). */
+/*
+ * UART2 视觉帧解析状态（文件作用域）：
+ * 放在这里而不是回调局部变量，是为了在 ErrorCallback 中也能复位状态机。
+ * 状态定义：
+ * 0=等待 0xFF；1=等待 0xFE；2=接收 4 字节数据；3=等待校验和
+ */
 static uint8_t s_vision_rx_state = 0;
 static uint8_t s_vision_rx_data_cnt = 0;
 static uint8_t s_vision_rx_data_buf[4] = {0};
@@ -101,7 +107,7 @@ float Get_Distance_Filtered(void)
 
 int __io_putchar(int ch)
 {
-  /* printf 重定向到串口1，方便调试打印。 */
+  /* printf 重定向到串口1（阻塞式，适合低频调试输出）。 */
   uint8_t c = (uint8_t)ch;
   (void)HAL_UART_Transmit(&huart1, &c, 1, 10);
   return ch;
@@ -150,6 +156,15 @@ int main(void)
   MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
 
+  /*
+   * 初始化顺序说明（按依赖关系排列）：
+   * 1) 先起外设（PWM/编码器/串口/看门狗）
+   * 2) 再初始化 PID 和 Flash 参数
+   * 3) 再初始化 IMU 等传感器
+   * 4) 最后创建并启动 FreeRTOS 任务
+   * 这样任务启动后能立即使用已准备好的资源。
+   */
+
   // --- 1. 电机与编码器启动 ---
   /* 先启动 PWM/编码器，后续控制任务启动后才能马上闭环控制，不用再等外设准备。 */
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -163,11 +178,11 @@ int main(void)
    * - UART3 命令口现在就开启，尽早响应蓝牙/遥控；
    * - UART2 视觉口放到 VisionTask 中开启，因为它依赖消息队列已经创建完成。
    */
-  // USART1 is used for debug TX only. Keep RX interrupt disabled to avoid IRQ storm.
+  // USART1 仅用于调试发送，不开 RX 中断，避免悬空串口导致中断风暴。
 #if UART3_CMD_ENABLE
   HAL_UART_Receive_IT(&huart3, &g_ucusrtrecivedate, 1);
 #endif
-  /* Start UART2 vision RX after FreeRTOS queues/tasks are ready (in VisionTask). */
+  /* UART2 视觉接收放到 VisionTask 中启动，确保队列/任务已经就绪。 */
 
   // --- 3. 算法参数初始化 ---
   /* PID 先给默认值，再从 Flash 覆盖成上次保存值，启动状态更可控。 */
@@ -269,7 +284,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
 #if UART3_CMD_ENABLE
     uint8_t cmd = g_ucusrtrecivedate;
-    // Only allow expected control keys, shielding random serial noise.
+    // 仅允许约定的控制键，屏蔽随机串口噪声/乱码。
     if (CommandQueueHandle != NULL &&
         (cmd == 'A' || cmd == 'B' || cmd == 'C' || cmd == 'D' ||
          cmd == 'E' || cmd == 'F' || cmd == 'G' || cmd == 'H' ||
@@ -303,7 +318,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       if (res == 0xFEU) {
         s_vision_rx_state = 2U;
       } else if (res == 0xFFU) {
-        /* Keep state=1 for repeated header byte to speed up re-sync. */
+        /* 连续收到 0xFF 时保持 state=1，能更快重新同步帧头。 */
         s_vision_rx_state = 1U;
       } else {
         s_vision_rx_state = 0U;
@@ -334,8 +349,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
     HAL_UART_Receive_IT(&huart2, &RxBuffer, 1);
   }
-  // 如果队列唤醒了高优先级任务，进行调度
-  /* 若 ISR 中唤醒了更高优先级任务，立即请求一次上下文切换。 */
+  /*
+   * 若 ISR 中唤醒了更高优先级任务，立即请求一次上下文切换。
+   * 这样命令和视觉数据能尽快进入任务处理链，降低控制延迟。
+   */
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -343,7 +360,10 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART2)
   {
-    /* 清错误标志 + 重置状态机，避免视觉串口卡在半帧状态。 */
+    /*
+     * 视觉串口出错后最常见问题是“状态机卡在半帧”。
+     * 处理顺序：清错误标志 -> 清解析状态 -> 重新挂接收中断。
+     */
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
@@ -354,7 +374,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   }
   else if (huart->Instance == USART3)
   {
-    /* 命令串口出错后要重新挂接收中断，不然之后会“静默失联”。 */
+    /* 命令串口出错后也要重挂接收，否则后续会表现为“静默失联”。 */
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
@@ -381,6 +401,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE END Callback 0 */
   if (htim->Instance == TIM3)
   {
+    /* TIM3 被配置为 HAL 时间基准，用于驱动 HAL_GetTick()/HAL_Delay()。 */
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */

@@ -8,6 +8,18 @@
 #include <stdint.h>
 #include <string.h>
 
+/*
+ * 参数持久化模块（Flash）设计目标：
+ * 1) 只保存可调参数，不保存运行时瞬态状态；
+ * 2) 双页轮换 + CRC + commit 标志，降低断电写坏风险；
+ * 3) UI 调参后延迟保存，减少擦写次数与卡顿。
+ *
+ * 典型调用链：
+ * - 上电：settings_load()
+ * - 参数改动：settings_mark_dirty()
+ * - 后台任务周期调用：settings_service()
+ */
+
 extern tpid pidMotor1Speed;
 extern tpid pidMotor2Speed;
 extern tpid pid_pidHW_Tracking;
@@ -74,6 +86,7 @@ static float clampf(float v, float lo, float hi)
 
 static uint32_t settings_crc32(const uint8_t *data, size_t len)
 {
+  /* 软件 CRC32（小端常见实现，使用反射多项式 0xEDB88320）。 */
   uint32_t crc = 0xFFFFFFFFUL;
   size_t i;
   uint8_t bit;
@@ -106,6 +119,10 @@ static uint32_t flash_size_bytes(void)
 
 static uint32_t settings_page_a_addr(void)
 {
+  /*
+   * 使用 Flash 最后两页作为参数双缓冲区（A/B）。
+   * 工程维护时要注意：链接脚本和固件体积不能覆盖这两页。
+   */
   /* 使用 Flash 最后一页的前一页作为 A 区，尽量不占主程序常用区域。 */
   uint32_t flash_end = FLASH_BASE + flash_size_bytes();
   return flash_end - (2U * FLASH_PAGE_SIZE);
@@ -282,6 +299,7 @@ static uint8_t settings_flash_write_record(uint32_t target_page, const SettingsR
 
   for (i = 0U; i < words_before_commit; i++)
   {
+    /* STM32F1 Flash 的最小编程粒度为半字（16bit）。 */
     status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, src16[i]);
     if (status != HAL_OK)
     {
@@ -329,6 +347,7 @@ bool settings_save_now(void)
 
   if (s_has_active)
   {
+    /* 始终写入另一页，保留当前页作为回退副本。 */
     target_page = (s_active_page == settings_page_a_addr()) ? settings_page_b_addr() : settings_page_a_addr();
   }
   else
@@ -363,6 +382,7 @@ void settings_load(void)
   }
 
   settings_apply_payload(&rec.payload);
+  /* 记录当前活动页和序号，供下一次保存选择目标页与递增 seq。 */
   s_has_active = 1U;
   s_active_page = page;
   s_active_seq = rec.seq;
@@ -370,7 +390,10 @@ void settings_load(void)
 
 void settings_mark_dirty(void)
 {
-  /* 只做“打脏标记 + 记录时间”，真正写 Flash 放到后台任务里。 */
+  /*
+   * 只做“打脏标记 + 记录时间”，真正写 Flash 放到后台任务里。
+   * 这样 UI 连续按键调参时不会频繁阻塞在 Flash 擦写。
+   */
   s_dirty = 1U;
   s_dirty_tick = HAL_GetTick();
 }
@@ -384,6 +407,7 @@ void settings_service(void)
    * - UI 连续调参时不会每次按键都擦写 Flash；
    * - 降低磨损，也减少频繁写 Flash 带来的卡顿。
    */
+  /* 本工程中该函数由 DefaultTask 周期调用。 */
   if (s_dirty == 0U) return;
 
   now = HAL_GetTick();
@@ -394,6 +418,7 @@ void settings_service(void)
 
   if (settings_save_now())
   {
+    /* 成功后清脏，直到下一次参数变更再写。 */
     s_dirty = 0U;
   }
   else

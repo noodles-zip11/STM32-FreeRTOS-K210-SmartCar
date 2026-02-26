@@ -51,6 +51,21 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/*
+ * 本文件是整车“运行时核心”：
+ * 1) 创建 FreeRTOS 任务/队列（静态分配）；
+ * 2) 维护传感器快照、视觉运行态、模式状态机；
+ * 3) 在 LogicTask 中把“模式逻辑”转换为目标速度；
+ * 4) 在 ControlTask 中把目标速度闭环成 PWM 输出；
+ * 5) 提供本地 OLED UI 参数菜单。
+ *
+ * 阅读建议：
+ * - 先看 MX_FREERTOS_Init()（任务/队列拓扑）
+ * - 再看 StartSensorTask()/StartVisionTask()（数据来源）
+ * - 再看 StartLogicTask()（行为决策）
+ * - 最后看 StartControlTask()（执行层闭环）
+ */
+
 //pid变量
 /*
  * 巡线模式参数（同时也是 UI 可调参数，会被 settings 模块持久化）。
@@ -105,6 +120,15 @@ float g_line_last_track_turn = 0.0f;
 TickType_t g_line_search_enter_tick = 0U;
 int8_t g_line_search_latched_sign = 1;
 
+/*
+ * 视觉巡线调参常量（单位约定）：
+ * - *_MS：时间窗口（毫秒）
+ * - *_TH：阈值（质量/误差）
+ * - *_SPEED_*：目标轮速（与 PID 目标速度同单位）
+ * - *_TURN_*：左右轮差速转向量（与速度同单位）
+ *
+ * 这些常量主要影响 Mode1 的三个子状态：TRACK / SEARCH / LOST_STOP。
+ */
 #define LINE_VISION_FRESH_MS      150U
 #define LINE_VISION_STOP_MS       800U
 #define LINE_VISION_QUALITY_TH    350
@@ -139,6 +163,15 @@ int8_t g_line_search_latched_sign = 1;
 uint8_t g_ucusrtrecivedate;
 
 //模式切换
+/*
+ * 模式编号约定（由 LogicTask 的 switch(g_ucMode) 实现）：
+ * 0=待机/人工串口控制保持
+ * 1=视觉巡线
+ * 2=超声避障
+ * 3=距离跟随
+ * 4=IMU 航向保持直行
+ * 5=保留/停车
+ */
 volatile uint8_t g_ucMode = 0 ;
 
 //走直线
@@ -246,7 +279,7 @@ static StackType_t xStartUITaskStack[384];
 /* USER CODE BEGIN PM */
 //ui菜单
 #define UI_LIST_LINES 4
-/* 128px OLED + 8px fixed-width font -> one row safely fits 16 chars. */
+/* 128px OLED + 8px 等宽字体 => 一行安全显示 16 个字符。 */
 #define UI_LINE_CHARS 16
 #define UI_KEY_DEBOUNCE_MS 5
 #define UI_KEY_LONG_MS 350
@@ -261,27 +294,42 @@ typedef enum { MENU_VALUE_NONE=0, MENU_VALUE_FLOAT=1, MENU_VALUE_INT8=2, MENU_VA
 typedef enum { UI_VIEW_MENU=0, UI_VIEW_STATUS=1, UI_VIEW_EDIT=2 } UiView;
 
 typedef struct {
+  /* 菜单项名称（显示在 OLED 上）。 */
   const char *name;
+  /* 菜单项类型：子菜单 / 参数 / 动作页。 */
   MenuItemType type;
+  /* 父节点索引；根节点为 -1。 */
   int8_t parent;
+  /* 参数值类型（UI 负责按类型格式化/读写）。 */
   MenuValueType value_type;
+  /* 指向实际参数变量（float/int8/int16/int32）。 */
   void *value_ptr;
+  /* 调整步进（编辑模式短按一次的增减量）。 */
   float step;
+  /* 参数最小/最大值（编辑时限幅）。 */
   float min;
   float max;
+  /* 动作项的附加 ID（例如进入状态页）。 */
   uint8_t action_id;
 } MenuItem;
 
 typedef struct {
+  /* 去抖后稳定电平（1=按下，0=松开）。 */
   uint8_t stable;
+  /* 原始采样电平（未去抖）。 */
   uint8_t last_raw;
+  /* 原始电平最近一次变化时刻。 */
   uint32_t last_change;
+  /* 确认按下后的时间戳（用于判定长按）。 */
   uint32_t press_tick;
+  /* 长按事件是否已经发出（防止重复触发）。 */
   uint8_t long_sent;
 } KeyState;
 
 typedef struct {
+  /* 短按：按下并释放，且未触发过长按。 */
   uint8_t short_press;
+  /* 长按：按住超过阈值，仅触发一次。 */
   uint8_t long_press;
 } KeyEvent;
 
@@ -313,6 +361,12 @@ enum {
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+/*
+ * 菜单表采用“平铺数组 + parent 索引”而不是树指针：
+ * - 不需要动态分配；
+ * - 更适合在 MCU 上做静态初始化；
+ * - 便于 settings/UI 共享参数指针。
+ */
 static const MenuItem g_menu_items[MENU_IDX_COUNT] = {
   {"Root", MENU_TYPE_SUBMENU, -1, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, 0},
   {"Status", MENU_TYPE_ACTION, MENU_IDX_ROOT, MENU_VALUE_NONE, 0, 0.0f, 0.0f, 0.0f, MENU_ACTION_STATUS},
@@ -465,6 +519,10 @@ void MX_FREERTOS_Init(void) {
   StartUITaskHandle = osThreadCreate(osThread(StartUITask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
+  /*
+   * UI 任务创建时先给低优先级，确认系统能拉起后再升到 Normal。
+   * 这样更容易在调试阶段观察是否因 UI 栈或初始化阻塞影响系统启动。
+   */
   osThreadSetPriority(StartUITaskHandle, osPriorityNormal);
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -533,7 +591,8 @@ void StartControlTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    //有队列有值就传递target，反向清数据
+    // 1) 获取最新目标速度（来自逻辑任务/串口手动命令）
+    //    队列长度为 1，拿到的永远是最新值。
     if (xQueueReceive(MotorTargetQueueHandle, &target, 0) == pdTRUE)
     {
       float new_target_m1 = target.left;
@@ -558,14 +617,14 @@ void StartControlTask(void const * argument)
       last_target_m2 = new_target_m2;
     }
 
-    //精准计算控制周期
+    // 2) 计算本周期真实 dt（秒），而不是假设恒定 10ms
     /* 用实际 tick 差计算 dt，避免任务抖动让速度估算偏掉。 */
     TickType_t now = xTaskGetTickCount();
     dt = (now - lastTick) * 0.001f;
     if (dt <= 0.0f) dt = 0.01f;
     lastTick = now;
 
-    //获得圈数
+    // 3) 读取编码器增量并清零（增量式测速）
     /* 读取本周期编码器增量后清零，下一周期重新累计。 */
     Encoder1Count=(short)__HAL_TIM_GET_COUNTER(&htim4);
     Encoder2Count=(short)__HAL_TIM_GET_COUNTER(&htim2);
@@ -573,7 +632,7 @@ void StartControlTask(void const * argument)
     __HAL_TIM_SET_COUNTER(&htim4,0);
     __HAL_TIM_SET_COUNTER(&htim2,0);
 
-    //计算当前速度
+    // 4) 把编码器计数换算成轮速（圈/秒），再按接线方向修正符号
     float rev1 = (float)Encoder1Count / (ENC_PPR * GEAR_RATIO);
     float rev2 = (float)Encoder2Count / (ENC_PPR * GEAR_RATIO);
     float raw_m1_speed = rev1 / dt;
@@ -586,13 +645,13 @@ void StartControlTask(void const * argument)
     m1_speed_f += SPEED_LPF_A * (Motor1Speed - m1_speed_f);
     m2_speed_f += SPEED_LPF_A * (Motor2Speed - m2_speed_f);
 
-   //设置速度
+    // 5) 速度低通后进入 PID，输出差速 PWM
     Motor_Set(
       PID_realize(&pidMotor1Speed, m1_speed_f, dt),
       PID_realize(&pidMotor2Speed, m2_speed_f, dt)
     );
 
-    //vofa
+    // 6) 调试波形发送（当前默认关闭，避免占用串口带宽）
     // if ((now - g_vofa_tx_tick) >= pdMS_TO_TICKS(50))
     // {
     //   float target_speed = 0.5f * (pidMotor1Speed.target_val + pidMotor2Speed.target_val);
@@ -601,9 +660,10 @@ void StartControlTask(void const * argument)
     //   g_vofa_tx_tick = now;
     // }
 
+    // 7) 控制任务是系统关键节拍之一，用它喂狗可尽早暴露调度卡死
     HAL_IWDG_Refresh(&hiwdg);  // 周期性刷新 IWDG，避免任务阻塞导致系统复位
 
-    //绝对延时
+    // 8) 使用绝对延时维持固定控制节拍
     vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(10));
   }
   /* USER CODE END StartControlTask */
@@ -876,7 +936,7 @@ void StartLogicTask(void const * argument)
     //   g_uart_manual_active = 0;
     // }
 
-    //各模块功能
+    // 各模块功能
     /*
      * 各模式统一输出“目标速度”，真正 PWM 由 ControlTask 闭环计算。
      * 这样模式逻辑和电机控制解耦，调试会清楚很多。
@@ -1108,7 +1168,7 @@ void StartLogicTask(void const * argument)
         break;
       }
 
-      //避障
+      // 避障（定时状态机，避免在一个周期里完成整套动作）
       case 2:
 
         TickType_t  now = xTaskGetTickCount();
@@ -1154,7 +1214,7 @@ void StartLogicTask(void const * argument)
         }
         break;
 
-    //跟随
+      // 跟随（距离 PID 输出前后速度）
       case 3:
         /* 跟随模式：用超声距离 PID 输出前进/后退速度。 */
         if ((snap.sr04 > 0.0f) && (snap.sr04 < 60.0f))
@@ -1176,7 +1236,7 @@ void StartLogicTask(void const * argument)
         }
         break;
 
-    //走直线
+      // 走直线（IMU 航向保持）
       case 4:
       {
         /*
@@ -1228,7 +1288,7 @@ void StartLogicTask(void const * argument)
         motorPidSetSpeed(0,0);
         break;
     }
-    //绝对延时
+    // 逻辑任务节拍固定在 20ms，便于模式控制参数按时间尺度调节
     vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(20));
   }
   /* USER CODE END StartLogicTask */
@@ -1272,6 +1332,8 @@ void StartTask06(void const * argument)
 
   for(;;)
   {
+    // UI 循环分成三部分：采样按键 -> 更新状态机 -> 按需重绘
+    // 这样逻辑清晰，也便于后续增加第三个按键/更多页面。
     //获取时间
     uint32_t now = HAL_GetTick();
     //储存长按还是短按
@@ -1303,7 +1365,7 @@ void StartTask06(void const * argument)
           need_redraw = 1;
         }
       }
-      //正常短按
+      // 正常菜单浏览：短按移动光标，长按进入
       else
       {
         if (cursor >= count) cursor = (uint8_t)(count - 1);
@@ -1319,7 +1381,7 @@ void StartTask06(void const * argument)
           if (cursor >= count) cursor = 0;
           need_redraw = 1;
         }
-      //翻页
+        // 翻页：确保光标始终落在可视窗口内
         if (cursor < view_offset) view_offset = cursor;
         if (cursor >= view_offset + UI_LIST_LINES) view_offset = cursor - (UI_LIST_LINES - 1);
 
@@ -1382,7 +1444,7 @@ void StartTask06(void const * argument)
         redraw_pending = 0;
       }
     }
-    //改数据
+    // 编辑参数页：短按加减，长按上确认/下取消
     else if (view == UI_VIEW_EDIT)
     {
       const MenuItem *item = &g_menu_items[edit_index];
@@ -1504,7 +1566,7 @@ void vApplicationGetIdleTaskMemory( StaticTask_t **ppxIdleTaskTCBBuffer,
 //     HAL_UART_Transmit(&huart1, (uint8_t *)tx, (uint16_t)len, 5);
 //   }
 // }
-//万能数据读写助手，UI 逻辑都统一按 32 位处理
+// 万能数据读写助手，UI 逻辑都统一按 32 位处理
 static float clampf(float v, float vmin, float vmax)
 {
   /* 通用限幅工具：模式控制、UI 参数编辑都会用到。 */
@@ -1571,6 +1633,12 @@ static void ui_key_update(KeyState *k, uint8_t raw, uint32_t now, KeyEvent *evt)
 
 static void ui_format_float_fixed(float v, uint8_t decimals, char *buf, uint8_t len)
 {
+  /*
+   * 固定小数格式化的目标不是“最通用”，而是“在 MCU 上足够稳”：
+   * - 限制小数位 <= 3，避免格式化过重；
+   * - 处理 nan/溢出文本，防止 OLED 显示异常字符串；
+   * - 手动四舍五入，减少不同 libc 对 printf 浮点支持差异。
+   */
   uint32_t scale = 1U;
   uint8_t i;
   uint8_t neg;
@@ -1767,6 +1835,7 @@ static void ui_draw_status(void)
 
 void vApplicationMallocFailedHook(void)
 {
+  /* 动态分配失败（通常是某处误用 pvPortMalloc 或栈设置过大）。 */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
   taskDISABLE_INTERRUPTS();
   for(;;)
@@ -1776,6 +1845,7 @@ void vApplicationMallocFailedHook(void)
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
+  /* 任务栈溢出：点亮/拉低 LED 后停机，方便现场定位。 */
   (void)xTask;
   (void)pcTaskName;
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
