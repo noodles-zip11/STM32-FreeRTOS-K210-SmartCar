@@ -1,5 +1,11 @@
 # FreeRTOS 小车（STM32F103 + K210 黑线循迹）
 
+## 历史快照与验证状态
+
+本文档保留了项目在基线提交 `7ce04845e42bdc2dd3e943514f3bd8fefc8bf97b` 上的历史实车联调经验。硬件观察只绑定该基线；后续文档维护没有重新装车，也不扩展实车验证范围。默认/推荐实车组合是 STM32 的 `0xFF 0xFE` 旧帧解析与 `k210_v13_anti_glare.py`。`k210_v13_basic.py` 是使用相同旧帧协议的对比脚本；仓库没有单独记录它与推荐版具有同等范围的实车验证。
+
+历史实车联调、当前软件编译验证和未做实车验证的边界见 [验证状态](docs/VALIDATION_STATUS.md)。第三方代码的许可文件及待核实项见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
 ## 项目简介
 
 这是一个基于 `STM32F103` 的多模式智能小车项目，使用 `FreeRTOS` 进行任务调度，支持：
@@ -86,12 +92,12 @@
 
 你当前仓库里保留了多个 K210 脚本版本。作为 `v13（v2）` 使用时，建议优先使用：
 
-- `k210（v13）带抗光.py`（推荐）
+- `k210_v13_anti_glare.py`（推荐）
 
 另外保留了：
 
-- `k210（v13）不带抗光.py`（用于对比）
-- `k210（v14）.py`（实验版，不作为本 README 默认方案）
+- `k210_v13_basic.py`（用于对比）
+- `k210_v14_final.py`（未集成实验版，不作为本 README 默认方案）
 
 ## v13（v2）K210 的特点（旧协议）
 
@@ -104,6 +110,8 @@
 - `带抗光版` 增加 ROI 自适应阈值（对环境光变化更稳）
 
 注意：当前 STM32 工程里的 `main.c` 视觉串口解析也按旧帧（`x + quality`）实现，因此与 `v13（v2）` 是匹配的。
+
+`k210_v14_final.py` 当前默认发送 `0xFF 0xFD` 扩展帧（near/mid/far/quality），而当前 STM32 只解析 `0xFF 0xFE` 旧帧。该脚本文件头中“与当前固件兼容”和“当前 STM32 已支持扩展帧”的注释与当前 `Core/Src/main.c` 实现冲突，属于过时注释，应以 `main.c` 的实际 `0xFF 0xFE` 解析为准。因此 v14 是未集成实验，不能直接替换 v13 脚本；要使用它，必须先同步实现并验证 STM32 端扩展帧解析与控制逻辑。
 
 ## 功能模式说明（STM32 侧）
 
@@ -183,21 +191,21 @@ cmake --build --preset Release
 - STM32CubeProgrammer
 - OpenOCD（按你自己的环境配置）
 
-将生成的 `ELF/HEX` 烧录到板子即可。
+当前可烧录固件产物为 `build/<preset>/freertos_car.elf`，请使用所选工具烧录该 ELF 文件。本仓库当前不生成 HEX 文件；链接过程另生成 `freertos_car.map` 供分析使用。
 
 ## K210 使用说明（v13 v2）
 
 ## 推荐脚本
 
-- 默认推荐：`k210（v13）带抗光.py`
-- 若现场光照稳定、想做对比测试：`k210（v13）不带抗光.py`
+- 默认推荐：`k210_v13_anti_glare.py`
+- 若现场光照稳定、想做对比测试：`k210_v13_basic.py`
 
 ## 通信要求（与当前 STM32 工程匹配）
 
 - 波特率：`115200`
 - 协议：旧帧 `0xFF 0xFE + x + quality + checksum`
 
-如果后续改用 `v14`（扩展帧），需要同时确认 STM32 端视觉协议解析也切换到扩展帧版本。
+`k210_v14_final.py` 当前默认发送扩展帧 `0xFF 0xFD + near + mid + far + quality + checksum`。当前 STM32 端只解析 `0xFF 0xFE`，所以 v14 尚未集成，不能直接替换；后续改用 v14 时需要同步改造并验证 STM32 端协议解析和控制逻辑。
 
 ## 项目结构（简要）
 
@@ -211,7 +219,9 @@ cmake/                # 工具链与 CubeMX CMake glue
 freertos_car.ioc      # CubeMX 工程配置
 STM32F103XX_FLASH.ld  # 链接脚本
 startup_stm32f103xb.s # 启动文件
-k210（v13）带抗光.py    # K210 视觉脚本（推荐）
+k210_v13_anti_glare.py # K210 视觉脚本（推荐）
+k210_v13_basic.py      # K210 视觉脚本（对比）
+k210_v14_final.py      # K210 扩展帧实验脚本（未集成）
 ```
 
 ## 不足与反思（重点：K210 部分）
